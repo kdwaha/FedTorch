@@ -131,9 +131,9 @@ def train(
             current_state = F.get_parameters(model)
 
             ############## for constraint  ############################
-            #new_state = F.Constrainting(original_state, current_state)
+            new_state = F.Constrainting(original_state, current_state)
             #
-            #model.load_state_dict(new_state, strict=True)
+            model.load_state_dict(new_state, strict=True)
             ###########################################################
 
 

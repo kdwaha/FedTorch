@@ -39,7 +39,7 @@ if __name__ == '__main__':
     parser.add_argument('--momentum', type=float, default=0.9)
     parser.add_argument('--sample_ratio', type=float, default=1.0)
     parser.add_argument('--T', type=float, default=1.0)
-    parser.add_argument('--mu', type=float, default=0.01)
+    parser.add_argument('--mu', type=float, default=0.01) ##check proper hyper parameter for Moon and prox
     #parser.add_argument('--var_client', type=list, default=[])
 
     # Logs settings
@@ -105,7 +105,7 @@ if __name__ == '__main__':
         'weight_decay': 1e-5,
         'kl_temp': 2,
         'indicator_temp': 1,
-        'mu':args.mu,
+        'mu': args.mu,
     }
 
     write_experiment_summary("Client Setting", client_settings)

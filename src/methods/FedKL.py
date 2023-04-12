@@ -2,7 +2,7 @@ from src.methods import *
 from .utils import *
 
 
-@ray.remote
+@ray.remote(max_calls = 1)
 def train(
         client: Client,
         training_settings: dict,
