@@ -3,6 +3,7 @@ from src.clients import Aggregator
 from torch.nn import Module
 from torch.utils.tensorboard import SummaryWriter
 from src.train.train_utils import *
+from src.utils.hessian import hessian
 
 import random
 import ray
@@ -307,6 +308,64 @@ def mark_norm_gap(model_l: Module, model_g: Module, dataloader: DataLoader,
 # For hessian matrix value
 # Hessian matrix is related loss-landscape convexity
 # Warning : calculating hessian value is very time consuming task.
+
+# def mark_hessian(model: Module, data_loader: DataLoader, summary_writer: SummaryWriter, epoch: int) -> None:
+#     """
+#     Compute the accuracy using its whole data.
+#
+#     Args:
+#         model: (torch.Module) Training model.
+#         data_loader: (torch.utils.Dataloader) Dataloader.
+#         summary_writer: (SummaryWriter) SummaryWriter object.
+#         epoch: (int) Current global round.
+#
+#     Returns: ((float) maximum eigenvalue of hessian, (float) hessian trace)
+#
+#     """
+#     device = "cuda" if torch.cuda.is_available() is True else "cpu"
+#
+#     model.to(device)
+#     model.eval()
+#
+#     hessian_trace = 0.0
+#     max_eigval = 0.0
+#     count = 0
+#
+#     loss_fn = torch.nn.CrossEntropyLoss().to(device)
+#
+#     for x, y in data_loader:
+#         x = x.to(device)
+#         y = y.to(device).to(torch.long)
+#         outputs = model(x)
+#         if loss_fn is not None:
+#             loss = loss_fn(outputs, y)
+#
+#             grad1 = torch.autograd.grad(loss,model.parameters(),create_graph=True)
+#
+#             grad1 = torch.cat([grad.flatten() for grad in grad1])
+#
+#             count += len(grad1)
+#
+#             for i in range(grad1.size(0)):
+#
+#                 grad2 = torch.autograd.grad(grad1[i], model.parameters(), create_graph=True)
+#
+#                 grad2 = torch.cat([grad.flatten() for grad in grad2])
+#
+#                 hessian_trace += grad2.sum().item()
+#
+#                 max_eigval = max(max_eigval, torch.abs(grad2).max().item())
+#         break
+#
+#     hessian_trace /= count
+#     max_eigval /= count
+#
+#     summary_writer.add_scalar("max_hessian_eigen",max_eigval,epoch)
+#     summary_writer.add_scalar("hessian_trace",hessian_trace,epoch)
+#
+
+# test
+# have to compute using validation dataset
 def mark_hessian(model: Module, data_loader: DataLoader, summary_writer: SummaryWriter, epoch: int) -> None:
     """
     Compute the accuracy using its whole data.
@@ -331,35 +390,107 @@ def mark_hessian(model: Module, data_loader: DataLoader, summary_writer: Summary
 
     loss_fn = torch.nn.CrossEntropyLoss().to(device)
 
-    for x, y in data_loader:
-        x = x.to(device)
-        y = y.to(device).to(torch.long)
-        outputs = model(x)
-        if loss_fn is not None:
-            loss = loss_fn(outputs, y)
+    hessian_comp = hessian(model, loss_fn, dataloader=data_loader, cuda=True) # use it for computing hessian
+    top_eigenvalues, _ = hessian_comp.eigenvalues()
+    trace = hessian_comp.trace()
+    density_eigens, density_weights = hessian_comp.density()
 
-            grad1 = torch.autograd.grad(loss,model.parameters(),create_graph=True)
+    density, grids = density_generate(density_eigens, density_weights)
 
-            grad1 = torch.cat([grad.flatten() for grad in grad1])
+    fig = plt.figure()
 
-            count += len(grad1)
+    plt.semilogy(grids, density + 1.0e-7)
+    plt.ylabel('Density (Log Scale)', fontsize=14, labelpad=10)
+    plt.xlabel('Eigenvalue', fontsize=14, labelpad=10)
+    plt.xticks(fontsize=14)
+    plt.yticks(fontsize=14)
+    plt.axis([np.min(density_eigens) - 1, np.max(density_eigens) + 1, None, None])
+    plt.tight_layout()
 
-            for i in range(grad1.size(0)):
+    # have to save the figure...
+    del hessian_comp
 
-                grad2 = torch.autograd.grad(grad1[i], model.parameters(), create_graph=True)
+    lambda_min = np.min(density_eigens)
+    lambda_max = np.max(density_eigens)
+    lambda_ratio = lambda_max/lambda_min
+    if lambda_ratio < 0.0:
+        lambda_ratio = 0.0-lambda_ratio
 
-                grad2 = torch.cat([grad.flatten() for grad in grad2])
 
-                hessian_trace += grad2.sum().item()
+    summary_writer.add_scalar("max_hessian_eigen",lambda_max,epoch)
+    summary_writer.add_scalar("hessian_trace",trace,epoch)
 
-                max_eigval = max(max_eigval, torch.abs(grad2).max().item())
-        break
+    summary_writer.add_scalar("min_hessian_eigen",lambda_min,epoch)
+    summary_writer.add_scalar("min_max_eigen_ratio",lambda_ratio,epoch)
 
-    hessian_trace /= count
-    max_eigval /= count
+    if epoch%100 == 0:
+        summary_writer.add_figure("Hessian_eigen_density/{}".format(epoch), fig)
 
-    summary_writer.add_scalar("max_hessian_eigen",max_eigval,epoch)
-    summary_writer.add_scalar("hessian_trace",hessian_trace,epoch)
+
+    #
+    # for x, y in data_loader:
+    #     x = x.to(device)
+    #     y = y.to(device).to(torch.long)
+    #     outputs = model(x)
+    #     if loss_fn is not None:
+    #         loss = loss_fn(outputs, y)
+    #
+    #         grad1 = torch.autograd.grad(loss,model.parameters(),create_graph=True)
+    #
+    #         grad1 = torch.cat([grad.flatten() for grad in grad1])
+    #
+    #         count += len(grad1)
+    #
+    #         for i in range(grad1.size(0)):
+    #
+    #             grad2 = torch.autograd.grad(grad1[i], model.parameters(), create_graph=True)
+    #
+    #             grad2 = torch.cat([grad.flatten() for grad in grad2])
+    #
+    #             hessian_trace += grad2.sum().item()
+    #
+    #             max_eigval = max(max_eigval, torch.abs(grad2).max().item())
+    #     break ## calculate for first batch....
+    #
+    # hessian_trace /= count
+    # max_eigval /= count
+
+    #summary_writer.add_scalar("max_hessian_eigen",max_eigval,epoch)
+    #summary_writer.add_scalar("hessian_trace",hessian_trace,epoch)
+
+# functions that are needed to be predefined for hessian graph
+def density_generate(eigenvalues,
+                     weights,
+                     num_bins=10000,
+                     sigma_squared=1e-5,
+                     overhead=0.01):
+
+    eigenvalues = np.array(eigenvalues)
+    weights = np.array(weights)
+
+    lambda_max = np.mean(np.max(eigenvalues, axis=1), axis=0) + overhead
+    lambda_min = np.mean(np.min(eigenvalues, axis=1), axis=0) - overhead
+
+    grids = np.linspace(lambda_min, lambda_max, num=num_bins)
+    sigma = sigma_squared * max(1, (lambda_max - lambda_min))
+
+    num_runs = eigenvalues.shape[0]
+    density_output = np.zeros((num_runs, num_bins))
+
+    for i in range(num_runs):
+        for j in range(num_bins):
+            x = grids[j]
+            tmp_result = gaussian(eigenvalues[i, :], x, sigma)
+            density_output[i, j] = np.sum(tmp_result * weights[i, :])
+    density = np.mean(density_output, axis=0)
+    normalization = np.sum(density) * (grids[1] - grids[0])
+    density = density / normalization
+    return density, grids
+
+def gaussian(x, x0, sigma_squared):
+    return np.exp(-(x0 - x)**2 /
+                  (2.0 * sigma_squared)) / np.sqrt(2 * np.pi * sigma_squared)
+
 
 
 

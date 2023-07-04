@@ -10,7 +10,7 @@ from torch.nn import Sequential, Linear, ReLU
 
 def model_call(model_name: str, num_of_classes: int):
     if model_name.lower() == 'custom_cnn':
-        return CustomCNN(num_of_classes=num_of_classes)
+        return CustomCNN(num_classes=num_of_classes)
     if model_name.lower() == 'moon_cnn':
         return ModelFedCon(10, n_classes=num_of_classes)
     if model_name.lower() == "resnet-50":

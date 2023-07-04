@@ -159,6 +159,9 @@ def train(
         summary_writer.add_scalar('epoch_acc/local_train', train_acc, client.epoch_counter)
         summary_writer.add_scalar('epoch_acc/local_test', test_acc, client.epoch_counter)
 
+        ## Hessian info
+        F.mark_hessian(model, client.test_loader, summary_writer, client.epoch_counter)
+
         # F.mark_accuracy(client, model, summary_writer)
         # F.mark_entropy(client, model, summary_writer)
 
@@ -291,7 +294,7 @@ def run(client_setting: dict, training_setting: dict, b_save_model: bool = False
             if gr == training_setting['global_iter']-1:
                 # global_info
                 F.mark_hessian(aggregator.model, aggregator.test_loader, aggregator.summary_writer, gr)
-
+        F.mark_hessian(aggregator.model, aggregator.test_loader, aggregator.summary_writer, 0)
         summary_logger.info("Global iteration finished successfully.")
     except Exception as e:
         system_logger, _ = get_logger(LOGGER_DICT['system'])
