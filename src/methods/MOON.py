@@ -159,8 +159,6 @@ def train(
         summary_writer.add_scalar('epoch_acc/local_train', train_acc, client.epoch_counter)
         summary_writer.add_scalar('epoch_acc/local_test', test_acc, client.epoch_counter)
 
-        ## Hessian info
-        F.mark_hessian(model, client.test_loader, summary_writer, client.epoch_counter)
 
         # F.mark_accuracy(client, model, summary_writer)
         # F.mark_entropy(client, model, summary_writer)
@@ -169,7 +167,8 @@ def train(
         F.mark_norm_size(current_state, summary_writer, client.epoch_counter)
 
         client.epoch_counter += 1
-
+    ## Hessian info
+    F.mark_hessian(model, client.test_loader, summary_writer, client.epoch_counter)
     # INFO - Local model update
     client.model = OrderedDict({k: v.clone().detach().cpu() for k, v in model.state_dict().items()})
     client.prev_model = deepcopy(model)

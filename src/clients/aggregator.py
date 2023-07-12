@@ -80,6 +80,7 @@ class Aggregator:
         """
         correct = []
         total = []
+        self.model.to(self.device)
         self.model.eval()
         with torch.no_grad():
             for x, y in self.test_loader:

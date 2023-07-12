@@ -1,5 +1,4 @@
-from . import *
-from src.model import NUMBER_OF_CLASSES
+from src.methods import *
 from .utils import *
 
 
@@ -9,7 +8,6 @@ def train(
         training_settings: dict,
         num_of_classes: int,
         early_stopping: bool = False):
-    # TODO: Need to check is_available() is allowed.
     device = "cuda" if torch.cuda.is_available() is True else "cpu"
 
     # INFO: Unblock the code if you use M1 GPU
@@ -22,7 +20,9 @@ def train(
     model.load_state_dict(client.model)
     model = model.to(device)
 
-    original_state = F.get_parameters(model)
+    model_g = model_call(training_settings['model'], num_of_classes)
+    model_g.load_state_dict(client.model)
+    model_g = model_g.to(device)
 
     # INFO - Optimizer
     optimizer = call_optimizer(training_settings['optim'])
@@ -31,41 +31,58 @@ def train(
     if training_settings['optim'].lower() == 'sgd':
         optim = optimizer(filter(lambda p: p.requires_grad, model.parameters()),
                           lr=training_settings['local_lr'],
-                          momentum=training_settings['momentum'])
+                          momentum=training_settings['momentum'],
+                          weight_decay=training_settings['weight_decay'])
     else:
         optim = optimizer(filter(lambda p: p.requires_grad, model.parameters()),
                           lr=training_settings['local_lr'])
-
-    # if early_stopping:
-    #     # TODO: patience value may be the hyperparameter.
-    #     early_stop = EarlyStopping(patience=5, summary_path=client_info['summary_path'], delta=0)
-    # else:
-    #     early_stop = None
 
     loss_fn = torch.nn.CrossEntropyLoss().to(device)
 
     # INFO: Local training logic
     for _ in range(training_settings['local_epochs']):
         training_loss = 0
+        _feature_kl_loss = 0
+        _outputs_kl_loss = 0
+
         summary_counter = 0
 
         # INFO: Training steps
         for x, y in client.train_loader:
             inputs = x.to(device)
-            labels = y.to(device).to(torch.long)
+            labels = y.to(device)
 
             model.train()
             model.to(device)
 
             optim.zero_grad()
 
-            outputs = model(inputs)
-            loss = loss_fn(outputs, labels)
+            local_outputs = model(inputs)
+
+            model_g.train()
+            model_g.to(device)
+            global_outputs = model_g(inputs)
+
+            one_hot = F.one_hot_encode(labels.detach(), num_classes=num_of_classes, device=device)
+
+            # TODO: torch.mean() should be included into norm_gap_fn.
+            Pc = F.calculate_norm_gap(local_outputs.detach(), one_hot, logit=True, normalize=False, prob=True)
+            Pg = F.calculate_norm_gap(global_outputs.detach(), one_hot, logit=True, normalize=False, prob=True)
+            entropy = torch.mean(F.entropy(local_outputs.detach(), prob=False, normalize=True, base='exp'))
+            _r = torch.mean(Pc) / (torch.mean(Pg) + torch.mean(Pc))
+            r = torch.exp(-_r)
+
+            T = training_settings['indicator_temp']
+            indicator = torch.sqrt(r / (1 + T * entropy))
+
+            cross_entropy_loss = loss_fn(local_outputs, labels)
+            outputs_kl_loss = F.loss_fn_kd(local_outputs, global_outputs.detach(),
+                                           alpha=indicator,
+                                           temperature=training_settings['kl_temp'])
+            loss = (1 - indicator) * cross_entropy_loss + outputs_kl_loss
 
             loss.backward()
             optim.step()
-
-            current_state = F.get_parameters(model)
 
             # INFO - Step summary
             training_loss += loss.item()
@@ -73,33 +90,25 @@ def train(
             client.step_counter += 1
             summary_counter += 1
 
-            if summary_counter % training_settings["summary_count"] == 0:
-                training_acc, _ = F.compute_accuracy(model, client.train_loader, loss_fn)
-                summary_writer.add_scalar('step_loss', training_loss / summary_counter, client.step_counter)
-                summary_writer.add_scalar('step_acc', training_acc, client.step_counter)
-                summary_counter = 0
-                training_loss = 0
-
-        # INFO - Epoch summary
-        test_acc, test_loss = F.compute_accuracy(model, client.test_loader, loss_fn)
-        train_acc, train_loss = F.compute_accuracy(model, client.train_loader, loss_fn)
-
-        summary_writer.add_scalar('epoch_loss/train', train_loss, client.epoch_counter)
-        summary_writer.add_scalar('epoch_loss/test', test_loss, client.epoch_counter)
-
-        summary_writer.add_scalar('epoch_acc/local_train', train_acc, client.epoch_counter)
-        summary_writer.add_scalar('epoch_acc/local_test', test_acc, client.epoch_counter)
-
-
-        # F.mark_accuracy(client, model, summary_writer)
-        # F.mark_entropy(client, model, summary_writer)
-
-        F.mark_cosine_similarity(current_state, original_state, summary_writer, client.epoch_counter)
-        F.mark_norm_size(current_state, summary_writer, client.epoch_counter)
+            summary_writer.add_scalar('experiment/r', r, client.step_counter)
+            summary_writer.add_scalar('experiment/indicator', indicator, client.step_counter)
+            summary_writer.add_scalar('experiment/entropy', entropy, client.step_counter)
 
         client.epoch_counter += 1
 
-    F.mark_hessian(model, client.test_loader, summary_writer, client.epoch_counter)
+        # INFO - Epoch summary
+        F.mark_accuracy(model_l=model, model_g=model_g, dataloader=client.train_loader, summary_writer=summary_writer,
+                        tag='epoch_metric/train_data', epoch=client.epoch_counter)
+
+        F.mark_accuracy(model_l=model, model_g=model_g, dataloader=client.test_loader, summary_writer=summary_writer,
+                        tag='epoch_metric/test_data', epoch=client.epoch_counter)
+
+        F.mark_entropy(model_l=model, model_g=model_g, dataloader=client.train_loader,
+                       summary_writer=summary_writer, epoch=client.epoch_counter)
+
+        F.mark_norm_gap(model_l=model, model_g=model_g, dataloader=client.train_loader,
+                        summary_writer=summary_writer, epoch=client.epoch_counter, prob=True)
+
     # INFO - Local model update
     client.model = OrderedDict({k: v.clone().detach().cpu() for k, v in model.state_dict().items()})
     return client
@@ -110,13 +119,12 @@ def local_training(clients: list,
                    num_of_class: int) -> list:
     """
     Args:
-        clients: (dict) client ID and Object pair
+        clients: (list) client list to join the training.
         training_settings: (dict) Training setting dictionary
         num_of_class: (int) Number of classes
     Returns: (List) Client Object result
 
     """
-    # sampled_clients = random.sample(list(clients.values()), k=int(len(clients.keys()) * sample_ratio))
     ray_jobs = []
     for client in clients:
         if training_settings['use_gpu']:
@@ -135,10 +143,11 @@ def local_training(clients: list,
     return trained_result
 
 
-def fed_avg(clients: List[Client], aggregator: Aggregator, global_lr: float, model_save: bool = False):
+def fed_kl(clients: List[Client], aggregator: Aggregator, global_lr: float, model_save: bool = False):
     total_len = 0
     empty_model = OrderedDict()
 
+    # INFO: Original FedAvg
     for client in clients:
         total_len += client.data_len()
 
@@ -150,7 +159,7 @@ def fed_avg(clients: List[Client], aggregator: Aggregator, global_lr: float, mod
                 empty_model[k] += client.model[k] * (client.data_len() / total_len) * global_lr
 
     # Global model updates
-    aggregator.set_parameters(empty_model)
+    aggregator.set_parameters(empty_model, strict=False)
     aggregator.global_iter += 1
 
     aggregator.test_accuracy = aggregator.compute_accuracy()
@@ -179,7 +188,6 @@ def run(client_setting: dict, training_setting: dict, b_save_model: bool = False
     client = Client
     clients, aggregator = client_initialize(client, fed_dataset, test_loader, valid_loader,
                                             client_setting, training_setting)
-
     start_runtime = time.time()
     # INFO - Training Global Steps
     try:
@@ -205,7 +213,7 @@ def run(client_setting: dict, training_setting: dict, b_save_model: bool = False
                                              training_settings=training_setting,
                                              num_of_class=NUMBER_OF_CLASSES[client_setting['dataset'].lower()])
             stream_logger.debug("[*] Federated aggregation scheme...")
-            fed_avg(trained_clients, aggregator, training_setting['global_lr'])
+            fed_kl(trained_clients, aggregator, training_setting['global_lr'])
             clients = F.update_client_dict(clients, trained_clients)
 
             # INFO - Save client models
@@ -217,11 +225,6 @@ def run(client_setting: dict, training_setting: dict, b_save_model: bool = False
             summary_logger.info("Global Running time: {}::{:.2f}".format(gr,
                                                                          end_time_global_iter - start_time_global_iter))
             summary_logger.info("Test Accuracy: {}".format(aggregator.test_accuracy))
-
-            if gr % 10 == 0:
-                F.mark_weight_distribution(trained_clients,aggregator.get_parameters(),aggregator.summary_writer,gr)
-                F.mark_hessian(aggregator.model, aggregator.test_loader, aggregator.summary_writer, gr)
-
         summary_logger.info("Global iteration finished successfully.")
     except Exception as e:
         system_logger, _ = get_logger(LOGGER_DICT['system'])
