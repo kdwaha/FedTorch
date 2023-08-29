@@ -3,6 +3,7 @@ from src.clients import Aggregator
 from torch.nn import Module
 from torch.utils.tensorboard import SummaryWriter
 from src.train.train_utils import *
+from src.utils.hessian import hessian
 
 import random
 import ray
@@ -334,6 +335,59 @@ def mark_norm_gap(model_l: Module, model_g: Module, dataloader: DataLoader,
 # For hessian matrix value
 # Hessian matrix is related loss-landscape convexity
 # Warning : calculating hessian value is very time consuming task.
+# def mark_hessian(model: Module, data_loader: DataLoader, summary_writer: SummaryWriter, epoch: int) -> None:
+#     """
+#     Compute the accuracy using its whole data.
+#
+#     Args:
+#         model: (torch.Module) Training model.
+#         data_loader: (torch.utils.Dataloader) Dataloader.
+#         summary_writer: (SummaryWriter) SummaryWriter object.
+#         epoch: (int) Current global round.
+#
+#     Returns: ((float) maximum eigenvalue of hessian, (float) hessian trace)
+#
+#     """
+#     device = "cuda" if torch.cuda.is_available() is True else "cpu"
+#
+#     model.to(device)
+#     model.eval()
+#
+#     hessian_trace = 0.0
+#     max_eigval = 0.0
+#     count = 0
+#
+#     loss_fn = torch.nn.CrossEntropyLoss().to(device)
+#
+#     for x, y in data_loader:
+#         x = x.to(device)
+#         y = y.to(device).to(torch.long)
+#         outputs, _ = model(x)
+#         if loss_fn is not None:
+#             loss = loss_fn(outputs, y)
+#
+#             grad1 = torch.autograd.grad(loss, model.parameters(), create_graph=True)
+#
+#             grad1 = torch.cat([grad.flatten() for grad in grad1])
+#
+#             count += len(grad1)
+#
+#             for i in range(grad1.size(0)):
+#
+#                 grad2 = torch.autograd.grad(grad1[i], model.parameters(), create_graph=True)
+#
+#                 grad2 = torch.cat([grad.flatten() for grad in grad2])
+#
+#                 hessian_trace += grad2.sum().item()
+#
+#                 max_eigval = max(max_eigval, torch.abs(grad2).max().item())
+#         break
+#
+#     hessian_trace /= count
+#     max_eigval /= count
+#
+#     summary_writer.add_scalar("max_hessian_eigen",max_eigval,epoch)
+#     summary_writer.add_scalar("hessian_trace",hessian_trace,epoch)
 def mark_hessian(model: Module, data_loader: DataLoader, summary_writer: SummaryWriter, epoch: int) -> None:
     """
     Compute the accuracy using its whole data.
@@ -358,36 +412,41 @@ def mark_hessian(model: Module, data_loader: DataLoader, summary_writer: Summary
 
     loss_fn = torch.nn.CrossEntropyLoss().to(device)
 
-    for x, y in data_loader:
-        x = x.to(device)
-        y = y.to(device).to(torch.long)
-        outputs, _ = model(x)
-        if loss_fn is not None:
-            loss = loss_fn(outputs, y)
+    hessian_comp = hessian(model, loss_fn, dataloader=data_loader, cuda=True) # use it for computing hessian
+    top_eigenvalues, _ = hessian_comp.eigenvalues()
+    trace = hessian_comp.trace()
+    density_eigens, density_weights = hessian_comp.density()
 
-            grad1 = torch.autograd.grad(loss, model.parameters(), create_graph=True)
+    density, grids = density_generate(density_eigens, density_weights)
 
-            grad1 = torch.cat([grad.flatten() for grad in grad1])
+    fig = plt.figure()
 
-            count += len(grad1)
+    plt.semilogy(grids, density + 1.0e-7)
+    plt.ylabel('Density (Log Scale)', fontsize=14, labelpad=10)
+    plt.xlabel('Eigenvalue', fontsize=14, labelpad=10)
+    plt.xticks(fontsize=14)
+    plt.yticks(fontsize=14)
+    plt.axis([np.min(density_eigens) - 1, np.max(density_eigens) + 1, None, None])
+    plt.tight_layout()
 
-            for i in range(grad1.size(0)):
+    # have to save the figure...
+    del hessian_comp
 
-                grad2 = torch.autograd.grad(grad1[i], model.parameters(), create_graph=True)
+    lambda_min = np.min(density_eigens)
+    lambda_max = np.max(density_eigens)
+    lambda_ratio = lambda_max/lambda_min
+    if lambda_ratio < 0.0:
+        lambda_ratio = 0.0-lambda_ratio
 
-                grad2 = torch.cat([grad.flatten() for grad in grad2])
 
-                hessian_trace += grad2.sum().item()
+    summary_writer.add_scalar("max_hessian_eigen",lambda_max,epoch)
+    summary_writer.add_scalar("hessian_trace",trace,epoch)
 
-                max_eigval = max(max_eigval, torch.abs(grad2).max().item())
-        break
+    summary_writer.add_scalar("min_hessian_eigen",lambda_min,epoch)
+    summary_writer.add_scalar("min_max_eigen_ratio",lambda_ratio,epoch)
 
-    hessian_trace /= count
-    max_eigval /= count
-
-    summary_writer.add_scalar("max_hessian_eigen",max_eigval,epoch)
-    summary_writer.add_scalar("hessian_trace",hessian_trace,epoch)
-
+    if epoch%100 == 0:
+        summary_writer.add_figure("Hessian_eigen_density/{}".format(epoch), fig)
 
 
 
@@ -585,6 +644,53 @@ def Constrainting(original_state, current_state):
     for k in current_state.keys():
         gmean_tensor = torch.full(grad_state[k].shape, grad_mean)
         new_state[k] = original_state[k] * (1 - parallel_scale) + grad_state[k] - gmean_tensor
+
+    return new_state
+
+## INFO:
+## 1.Centering Gradient  2.Orthogonalize Gradient
+
+def Constrainting_layer_per_layer(original_state, current_state):
+    """
+    Adjust the gradient for each layer using centering and orthogonalization.
+    Args:
+        current_state: (OrderedDict) Local Model state
+        original_state: (OrderedDict) Global Model state
+
+    Returns: new_state: (OrderedDict) Adjusted Model state
+    """
+
+    new_state = OrderedDict()
+
+    for k in current_state.keys():
+        # Normalize global parameters using L2 norm to satisfy w^2 = 2.0
+        ori_mean = torch.mean(original_state[k])
+        original_state[k] = original_state[k] - ori_mean
+
+        l2_norm = torch.norm(original_state[k])
+        scaling_factor = torch.sqrt(torch.tensor(2.0)) / l2_norm
+        original_state[k] = original_state[k] * scaling_factor
+
+        grad = current_state[k] - original_state[k]
+
+        # Centering the gradient
+        grad_mean = torch.mean(grad)
+        grad_centered = grad - grad_mean
+
+        # Calculating cosine similarity for orthogonalization
+        C = torch.nn.CosineSimilarity(dim=-1)
+        cos_sim = C(grad_centered.flatten(), original_state[k].flatten())
+
+        # Calculating the scales for orthogonalization
+        G = torch.norm(original_state[k])
+        dG = torch.norm(grad_centered)
+        parallel_scale = cos_sim * dG / G
+
+        # Orthogonalizing the gradient
+        grad_orthogonalized = grad_centered - (parallel_scale * original_state[k].flatten()).reshape_as(grad)
+
+        # Update the local model with centered & orthogonalized gradient
+        new_state[k] = original_state[k] + grad_orthogonalized
 
     return new_state
 
