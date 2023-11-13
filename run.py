@@ -4,12 +4,11 @@ from conf.logger_config import STREAM_LOG_LEVEL, SUMMARY_LOG_LEVEL, SYSTEM_LOG_L
 from torch import cuda
 from distutils.util import strtobool
 from datetime import datetime
-from src.methods import FedAvg, FedKL, FedConst, Fedprox, Scaffold, MOON#, FedBalancer # FedIndi,
+from src.methods import FedAvg, FedKL, FedConst, Fedprox, Scaffold, MOON, FedSAM, FedDyn  # , FedBalancer # FedIndi,
 
 import argparse
 import os
 import traceback
-
 
 if __name__ == '__main__':
     # Argument Parser
@@ -30,6 +29,9 @@ if __name__ == '__main__':
     parser.add_argument('--save_model', type=lambda x: bool(strtobool(x)), default=False)
 
     # Training settings
+    parser.add_argument('--method', type=str, default='avg')
+    parser.add_argument('--const', type=lambda x: bool(strtobool(x)), default=False)
+    parser.add_argument('--bn', type=lambda x: bool(strtobool(x)), default=True)
     parser.add_argument('--opt', type=str, default='SGD')
     parser.add_argument('--batch', type=int, default=50)
     parser.add_argument('--local_iter', type=int, default=5)
@@ -40,7 +42,7 @@ if __name__ == '__main__':
     parser.add_argument('--sample_ratio', type=float, default=1.0)
     parser.add_argument('--T', type=float, default=1.0)
     parser.add_argument('--mu', type=float, default=0.01)
-    #parser.add_argument('--var_client', type=list, default=[])
+    # parser.add_argument('--var_client', type=list, default=[])
 
     # Logs settings
     parser.add_argument('--exp_name', type=str, required=True)
@@ -64,7 +66,8 @@ if __name__ == '__main__':
                                                  SUMMARY_LOG_LEVEL,
                                                  log_type='file')
     system_logger, sys_logger_name = get_logger("system_logger[{}]".format(args.exp_name),
-                                                os.path.join("./logs", "system_log_{}.log".format(datetime.today().date())),
+                                                os.path.join("./logs",
+                                                             "system_log_{}.log".format(datetime.today().date())),
                                                 SYSTEM_LOG_LEVEL,
                                                 log_type='file')
 
@@ -95,17 +98,19 @@ if __name__ == '__main__':
         'local_lr': args.local_lr,
         'momentum': args.momentum,
         'local_epochs': args.local_iter,
-        'global_iter': args.global_iter,## 수정함
+        'global_epochs': args.global_iter,  ## 수정함
         'batch_size': args.batch,
         'use_gpu': args.gpu,
         'gpu_frac': args.gpu_frac,
         'summary_count': args.summary_count,
         'sample_ratio': args.sample_ratio,
         'temperature': args.T,
-        'weight_decay': 1e-5,
+        'weight_decay': 0.0,#1e-5
         'kl_temp': 2,
         'indicator_temp': 1,
         'mu': args.mu,
+        'const': args.const,
+        'bn' : args.bn
     }
 
     write_experiment_summary("Client Setting", client_settings)
@@ -114,6 +119,7 @@ if __name__ == '__main__':
                                                  'GPU Fraction': args.gpu_frac})
 
     # INFO: Main starts
+    method = args.method
     try:
         # INFO: Run Function
         # TODO: Make additional Federated method
@@ -122,12 +128,26 @@ if __name__ == '__main__':
         # FedAD.run(client_settings, train_settings, experiment_name,
         #           b_save_model=args.save_model, b_save_data=args.save_data)
         # FedIndi.run(client_settings, train_settings, b_save_model=args.save_model, b_save_data=args.save_data)
-        # FedAvg.run(client_settings, train_settings, b_save_model=args.save_model, b_save_data=args.save_data)
-        # Fedprox.run(client_settings, train_settings, b_save_model=args.save_model, b_save_data=args.save_data)
-        FedConst.run(client_settings, train_settings, b_save_model=args.save_model, b_save_data=args.save_data)
-        # Scaffold.run(client_settings, train_settings, b_save_model=args.save_model, b_save_data=args.save_data)
+        if method == 'avg':
+            FedAvg.run(client_settings, train_settings, b_save_model=args.save_model, b_save_data=args.save_data)
+        elif method == 'prox' :
+            Fedprox.run(client_settings, train_settings, b_save_model=args.save_model, b_save_data=args.save_data)
+        elif method == 'const' :
+            FedConst.run(client_settings, train_settings, b_save_model=args.save_model, b_save_data=args.save_data)
+        elif method == 'sca' :
+            Scaffold.run(client_settings, train_settings, b_save_model=args.save_model, b_save_data=args.save_data)
+        elif method == 'sam' :
+            FedSAM.run(client_settings, train_settings, b_save_model=args.save_model, b_save_data=args.save_data)
+        elif method == 'dyn' :
+            FedDyn.run(client_settings, train_settings, b_save_model=args.save_model, b_save_data=args.save_data)
+        elif method =='moon' :
+            MOON.run(client_settings,train_settings, b_save_model=args.save_model, b_save_data= args.save_data)
+        else:
+            print("no method found")
         # MOON.run(client_settings, train_settings, b_save_model=args.save_model, b_save_data=args.save_data)
+        # FedSAM.run(client_settings, train_settings, b_save_model=args.save_model, b_save_data=args.save_data)
 
     except Exception as e:
         system_logger.error(traceback.format_exc())
         raise Exception(traceback.format_exc())
+

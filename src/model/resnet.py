@@ -17,25 +17,41 @@ def conv1x1(in_planes, out_planes, stride=1):
     """1x1 convolution"""
     return nn.Conv2d(in_planes, out_planes, kernel_size=1, stride=stride, bias=False)
 
+class Im(nn.Module):
+    def forward(self,x):
+        return x
+
+
 
 class BasicBlock(nn.Module):
     expansion = 1
 
     def __init__(self, inplanes, planes, stride=1, downsample=None, groups=1,
-                 base_width=64, dilation=1, norm_layer=None):
+                 base_width=64, dilation=1, norm_layer=None,bn = True):
         super(BasicBlock, self).__init__()
+        self.bn = bn
         if norm_layer is None:
-            norm_layer = nn.BatchNorm2d
+            if self.bn:
+                norm_layer = nn.BatchNorm2d
+            else:
+                norm_layer = Im
+
         if groups != 1 or base_width != 64:
             raise ValueError('BasicBlock only supports groups=1 and base_width=64')
         if dilation > 1:
             raise NotImplementedError("Dilation > 1 not supported in BasicBlock")
         # Both self.conv1 and self.downsample layers downsample the input when stride != 1
         self.conv1 = conv3x3(inplanes, planes, stride)
-        self.bn1 = norm_layer(planes)
+        if self.bn:
+            self.bn1 = norm_layer(planes, track_running_stats=False)
+        else:
+            self.bn1 = norm_layer
         self.relu = nn.ReLU(inplace=True)
         self.conv2 = conv3x3(planes, planes)
-        self.bn2 = norm_layer(planes)
+        if self.bn:
+            self.bn2 = norm_layer(planes, track_running_stats=False)
+        else:
+            self.bn2 = norm_layer
         self.downsample = downsample
         self.stride = stride
 
@@ -43,11 +59,13 @@ class BasicBlock(nn.Module):
         identity = x
 
         out = self.conv1(x)
-        out = self.bn1(out)
+        if self.bn:
+            out = self.bn1(out)
         out = self.relu(out)
 
         out = self.conv2(out)
-        out = self.bn2(out)
+        if self.bn:
+            out = self.bn2(out)
 
         if self.downsample is not None:
             identity = self.downsample(x)
@@ -71,15 +89,16 @@ class Bottleneck(nn.Module):
                  base_width=64, dilation=1, norm_layer=None):
         super(Bottleneck, self).__init__()
         if norm_layer is None:
-            norm_layer = nn.BatchNorm2d
+            #norm_layer = Im
+            norm_layer = nn.BatchNorm2d(track_running_stats=False)
         width = int(planes * (base_width / 64.)) * groups
         # Both self.conv2 and self.downsample layers downsample the input when stride != 1
         self.conv1 = conv1x1(inplanes, width)
-        self.bn1 = norm_layer(width)
+        self.bn1 = norm_layer#(width, track_running_stats=False)
         self.conv2 = conv3x3(width, width, stride, groups, dilation)
-        self.bn2 = norm_layer(width)
+        self.bn2 = norm_layer#(width, track_running_stats=False)
         self.conv3 = conv1x1(width, planes * self.expansion)
-        self.bn3 = norm_layer(planes * self.expansion)
+        self.bn3 = norm_layer#(planes * self.expansion, track_running_stats=False)
         self.relu = nn.ReLU(inplace=True)
         self.downsample = downsample
         self.stride = stride
@@ -111,10 +130,14 @@ class ResNetCifar10(nn.Module):
 
     def __init__(self, block, layers, num_classes=1000, zero_init_residual=False,
                  groups=1, width_per_group=64, replace_stride_with_dilation=None,
-                 norm_layer=None):
+                 norm_layer=None, bn = True):
         super(ResNetCifar10, self).__init__()
+        self.bn = bn
         if norm_layer is None:
-            norm_layer = nn.BatchNorm2d
+            if self.bn:
+                norm_layer = nn.BatchNorm2d
+            else:
+                norm_layer = Im
         self._norm_layer = norm_layer
 
         self.inplanes = 64
@@ -130,7 +153,10 @@ class ResNetCifar10(nn.Module):
         self.base_width = width_per_group
         self.conv1 = nn.Conv2d(3, self.inplanes, kernel_size=3, stride=1, padding=1,
                                bias=False)
-        self.bn1 = norm_layer(self.inplanes)
+        if self.bn:
+            self.bn1 = norm_layer(self.inplanes, track_running_stats=False)
+        else:
+            self.bn1 = norm_layer
         self.relu = nn.ReLU(inplace=True)
         self.layer1 = self._make_layer(block, 64, layers[0])
         self.layer2 = self._make_layer(block, 128, layers[1], stride=2,
@@ -140,7 +166,7 @@ class ResNetCifar10(nn.Module):
         self.layer4 = self._make_layer(block, 512, layers[3], stride=2,
                                        dilate=replace_stride_with_dilation[2])
         self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
-        self.fc = nn.Linear(512 * block.expansion, num_classes)
+        self.fc = nn.Linear(512 * block.expansion, num_classes, bias=False)
 
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
@@ -167,26 +193,32 @@ class ResNetCifar10(nn.Module):
             self.dilation *= stride
             stride = 1
         if stride != 1 or self.inplanes != planes * block.expansion:
-            downsample = nn.Sequential(
-                conv1x1(self.inplanes, planes * block.expansion, stride),
-                norm_layer(planes * block.expansion),
-            )
+            if self.bn:
+                downsample = nn.Sequential(
+                    conv1x1(self.inplanes, planes * block.expansion, stride),
+                    norm_layer(planes * block.expansion, track_running_stats=False),
+                )
+            else:
+                downsample = nn.Sequential(
+                    conv1x1(self.inplanes, planes * block.expansion, stride),
+                )
 
         layers = []
         layers.append(block(self.inplanes, planes, stride, downsample, self.groups,
-                            self.base_width, previous_dilation, norm_layer))
+                            self.base_width, previous_dilation, norm_layer, bn=self.bn))
         self.inplanes = planes * block.expansion
         for _ in range(1, blocks):
             layers.append(block(self.inplanes, planes, groups=self.groups,
                                 base_width=self.base_width, dilation=self.dilation,
-                                norm_layer=norm_layer))
+                                norm_layer=norm_layer, bn=self.bn))
 
         return nn.Sequential(*layers)
 
     def _forward_impl(self, x):
         # See note [TorchScript super()]
         x = self.conv1(x)
-        x = self.bn1(x)
+        if self.bn:
+            x = self.bn1(x)
         x = self.relu(x)
 
         x = self.layer1(x)
@@ -203,10 +235,11 @@ class ResNetCifar10(nn.Module):
     def forward(self, x):
         return self._forward_impl(x)
 
-    def feature_maps(self, x):
-        with torch.no_grad():
+    def feature_maps(self, x, requires_grad=True):
+        with torch.set_grad_enabled(requires_grad):
             x = self.conv1(x)
-            x = self.bn1(x)
+            if self.bn:
+                x = self.bn1(x)
             x = self.relu(x)
 
             x = self.layer1(x)
@@ -216,7 +249,7 @@ class ResNetCifar10(nn.Module):
         return x
 
 
-def ResNet18_cifar10(**kwargs):
+def ResNet18_cifar10( **kwargs):
     r"""ResNet-18 model from
     `"Deep Residual Learning for Image Recognition" <https://arxiv.org/pdf/1512.03385.pdf>`_
 

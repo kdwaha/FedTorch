@@ -29,9 +29,12 @@ def train(
 
     # INFO - Optimizations
     if training_settings['optim'].lower() == 'sgd':
-        optim = optimizer(filter(lambda p: p.requires_grad, model.parameters()),
-                          lr=training_settings['local_lr'],
-                          momentum=training_settings['momentum'], weight_decay=training_settings['weight_decay'])
+        # optim = optimizer(filter(lambda p: p.requires_grad, model.parameters()),
+        #                   lr=training_settings['local_lr'],
+        #                   momentum=training_settings['momentum'], weight_decay=1e-4)
+        base_optimizer = torch.optim.SGD
+        optim = F.SAM(model.parameters(), base_optimizer, lr=training_settings['local_lr'], momentum=training_settings['momentum'],
+                      weight_decay=training_settings['weight_decay'])
     else:
         optim = optimizer(filter(lambda p: p.requires_grad, model.parameters()),
                           lr=training_settings['local_lr'])
@@ -54,28 +57,36 @@ def train(
             inputs = x.to(device)
             labels = y.to(device).to(torch.long)
 
+            def closure():
+                loss = loss_fn(model(inputs), labels)
+                loss.backward()
+                return loss
+
             model.train()
             model.to(device)
 
-            optim.zero_grad()
+            #optim.zero_grad()
 
             outputs = model(inputs)
-            loss = loss_fn(outputs, labels.to(torch.long))
+            loss = loss_fn(outputs, labels)
 
             loss.backward()
-            optim.step()
+            # optim.step()
+            optim.step(closure)
+            optim.zero_grad()
 
             current_state = F.get_parameters(model)
-
             for k in current_state.keys():
                 current_state[k] =current_state[k].to(device)
                 original_state[k] = original_state[k].to(device)
 
-            #  new_state = F.Constrainting(original_state,current_state)
-            # current_state = F.Constrainting_layer_per_layer(original_state, current_state)
-            current_state = F.Constrainting_strict(original_state, current_state)
-
-            model.load_state_dict(current_state, strict=True)
+            ############## For constraint  ###############################
+            # current_state = F.Constrainting(original_state,current_state)
+            if training_settings['const']:
+                #current_state = F.Constrainting_layer_per_layer(original_state, current_state)
+                current_state = F.Constrainting_strict(original_state, current_state)
+                model.load_state_dict(current_state, strict=True)
+            ##############################################################
 
             # INFO - Step summary
             training_loss += loss.item()
@@ -94,11 +105,14 @@ def train(
         test_acc, test_loss = F.compute_accuracy(model, client.test_loader, loss_fn)
         train_acc, train_loss = F.compute_accuracy(model, client.train_loader, loss_fn)
 
-
+        fmean, fvar, wmean, wvar = F.compute_feature_weight_stat(model, client.test_loader)
+        summary_writer.add_scalar('epoch_fmean/test', fmean, client.epoch_counter)
+        summary_writer.add_scalar('epoch_fvar/test', fvar, client.epoch_counter)
+        summary_writer.add_scalar('epoch_wmean/test', wmean, client.epoch_counter)
+        summary_writer.add_scalar('epoch_wvar/test', wvar, client.epoch_counter)
 
         summary_writer.add_scalar('epoch_loss/train', train_loss, client.epoch_counter)
         summary_writer.add_scalar('epoch_loss/test', test_loss, client.epoch_counter)
-
 
         summary_writer.add_scalar('epoch_acc/local_train', train_acc, client.epoch_counter)
         summary_writer.add_scalar('epoch_acc/local_test', test_acc, client.epoch_counter)
@@ -109,17 +123,17 @@ def train(
         # F.mark_accuracy(client, model, summary_writer)
         # F.mark_entropy(client, model, summary_writer)
 
-        F.mark_cosine_similarity(current_state,original_state,summary_writer,client.epoch_counter)
-        F.mark_norm_size(current_state,summary_writer,client.epoch_counter)
+        F.mark_cosine_similarity(current_state, original_state, summary_writer, client.epoch_counter)
+        F.mark_norm_size(current_state, summary_writer, client.epoch_counter)
 
         client.epoch_counter += 1
-
+    # if client.epoch_counter == 250:
+    #    F.mark_hessian(model, client.test_loader, summary_writer, client.epoch_counter)
     # INFO - Local model update
     client.epoch_counter = client.epoch_counter
     client.step_counter = client.step_counter
     client.model = OrderedDict({k: v.clone().detach().cpu() for k, v in model.state_dict().items()})
     return client
-
 
 
 def local_training(clients: list,
@@ -195,7 +209,8 @@ def run(client_setting: dict, training_setting: dict, b_save_model: bool = False
     # INFO - Client initialization
     client = Client
     aggregator: type(Aggregator) = Aggregator
-    clients, aggregator = client_initialize(client, aggregator, fed_dataset, test_loader, valid_loader,client_setting, training_setting)
+    clients, aggregator = client_initialize(client, aggregator, fed_dataset, test_loader, valid_loader,
+                                            client_setting, training_setting)
 
     start_runtime = time.time()
     # INFO - Training Global Steps
@@ -223,6 +238,7 @@ def run(client_setting: dict, training_setting: dict, b_save_model: bool = False
                                              num_of_class=NUMBER_OF_CLASSES[client_setting['dataset'].lower()])
             stream_logger.debug("[*] Federated aggregation scheme...")
             fed_avg(trained_clients, aggregator, training_setting['global_lr'])
+            clients = F.update_client_dict(clients, trained_clients)
 
             # INFO - Save client models
             if b_save_model:
@@ -234,9 +250,13 @@ def run(client_setting: dict, training_setting: dict, b_save_model: bool = False
                                                                          end_time_global_iter - start_time_global_iter))
             summary_logger.info("Test Accuracy: {}".format(aggregator.test_accuracy))
 
+            if gr == training_setting['global_epochs'] - 1:
+                F.compute_loss_slope(aggregator.model, aggregator.test_loader, aggregator.summary_writer, gr,
+                                   torch.nn.CrossEntropyLoss())
+
             #if gr % 10 == 0:
             #    F.mark_weight_distribution(trained_clients,aggregator.get_parameters(),aggregator.summary_writer,gr)
-                #F.mark_hessian(aggregator.model, aggregator.test_loader, aggregator.summary_writer, gr)
+                # F.mark_hessian(aggregator.model, aggregator.test_loader, aggregator.summary_writer, gr)
 
         summary_logger.info("Global iteration finished successfully.")
     except Exception as e:

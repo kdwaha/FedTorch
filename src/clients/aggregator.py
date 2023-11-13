@@ -26,7 +26,7 @@ class Aggregator:
         self.lr = train_settings['global_lr']
 
         # Model
-        self.model: Module = model_call(train_settings['model'], NUMBER_OF_CLASSES[dataset_name])
+        self.model: Module = model_call(train_settings['model'], NUMBER_OF_CLASSES[dataset_name], bn = train_settings['bn'])
 
         main_dir = Path(log_path).parent.absolute()
         root_dir = Path("./logs").absolute()

@@ -20,7 +20,7 @@ def train(
     summary_writer = SummaryWriter(os.path.join(client.summary_path, "summaries"))
 
     # INFO - Call the model architecture and set parameters.
-    model = model_call(training_settings['model'], num_of_classes)
+    model = model_call(training_settings['model'], num_of_classes, bn=training_settings['bn'])
     model.load_state_dict(client.model)
     model = model.to(device)
 
@@ -29,8 +29,12 @@ def train(
 
     if not hasattr(client,'prev_model'):
         client.prev_model = deepcopy(model)
+        for param in client.prev_model.parameters():
+            param.requires_grad = False
 
     global_model = deepcopy(model)
+    for param in global_model.parameters():
+        param.requires_grad = False
 
 
     # INFO - Optimizer
@@ -59,18 +63,18 @@ def train(
         summary_counter = 0
 
         ###############################################################################
-        representations = {}
-
-        # INFO: HELPER FUNCTION FOR FEATURE EXTRACTION
-        def get_representations(name):
-            def hook(model, input, output):
-                representations[name] = output.detach()
-
-            return hook
-
-        # INFO: REGISTER HOOK
-        # TODO: Model specific, need to make general for the future.
-        model.features.register_forward_hook(get_representations('rep'))
+        # representations = {}
+        #
+        # # INFO: HELPER FUNCTION FOR FEATURE EXTRACTION
+        # def get_representations(name):
+        #     def hook(model, input, output):
+        #         representations[name] = output.detach()
+        #
+        #     return hook
+        #
+        # # INFO: REGISTER HOOK
+        # # TODO: Model specific, need to make general for the future.
+        # model.features.register_forward_hook(get_representations('rep'))
         ###############################################################################
 
 
@@ -94,23 +98,30 @@ def train(
             # MOON's reperesentation extraction mechanism
 
 
-            l_rep = representations['rep'].reshape((inputs.shape[0], -1))
+            #l_rep = representations['rep'].reshape((inputs.shape[0], -1))
+            l_rep = global_model.feature_maps(inputs).reshape((inputs.shape[0], -1))
 
-            _ = global_model(inputs)
-            g_rep = representations['rep'].reshape((inputs.shape[0], -1))
+            # _ = global_model(inputs)
+
+            # g_rep = representations['rep'].reshape((inputs.shape[0], -1))
+            g_rep = model.feature_maps(inputs).reshape((inputs.shape[0], -1))
+
             posi = cos_sim(l_rep, g_rep).reshape(-1, 1)
 
 
-            _ = client.prev_model(inputs)
-            p_rep = representations['rep'].reshape((inputs.shape[0], -1))
+            # _ = client.prev_model(inputs)
+            p_rep = client.prev_model.feature_maps(inputs).reshape((inputs.shape[0], -1))
+            #p_rep = representations['rep'].reshape((inputs.shape[0], -1))
             nega = cos_sim(l_rep, p_rep).reshape(-1, 1)
 
 
             logits = torch.cat((posi, nega), dim=1)
 
             # Hyperparameter
-            #temperature = 0.5
+            # temperature = 0.5
             temperature = training_settings['temperature']
+            # mu value
+            # 1.o
             mu = training_settings['mu']
 
             logits /= temperature
@@ -131,6 +142,7 @@ def train(
 
             ############## for constraint  ############################
             #new_state = F.Constrainting(original_state, current_state)
+            #new_state = F.Constrainting_strict(original_state, current_state)
             #
             #model.load_state_dict(new_state, strict=True)
             ###########################################################
@@ -141,6 +153,14 @@ def train(
 
             client.step_counter += 1
             summary_counter += 1
+
+            if training_settings['const']:
+                for k in current_state.keys():
+                    current_state[k] =current_state[k].to(device)
+                    original_state[k] = original_state[k].to(device)
+            # current_state = F.Constrainting_layer_per_layer(original_state, current_state)
+                current_state = F.Constrainting_strict(original_state, current_state)
+                model.load_state_dict(current_state, strict=True)
 
             if summary_counter % training_settings["summary_count"] == 0:
                 training_acc, _ = F.compute_accuracy(model, client.train_loader, loss_fn)
@@ -159,8 +179,14 @@ def train(
         summary_writer.add_scalar('epoch_acc/local_train', train_acc, client.epoch_counter)
         summary_writer.add_scalar('epoch_acc/local_test', test_acc, client.epoch_counter)
 
+        fmean, fvar, wmean, wvar = F.compute_feature_weight_stat(model, client.test_loader)
+        summary_writer.add_scalar('epoch_fmean/test', fmean, client.epoch_counter)
+        summary_writer.add_scalar('epoch_fvar/test', fvar, client.epoch_counter)
+        summary_writer.add_scalar('epoch_wmean/test', wmean, client.epoch_counter)
+        summary_writer.add_scalar('epoch_wvar/test', wvar, client.epoch_counter)
+
         ## Hessian info
-        F.mark_hessian(model, client.test_loader, summary_writer, client.epoch_counter)
+        # F.mark_hessian(model, client.test_loader, summary_writer, client.epoch_counter)
 
         # F.mark_accuracy(client, model, summary_writer)
         # F.mark_entropy(client, model, summary_writer)
@@ -171,6 +197,8 @@ def train(
         client.epoch_counter += 1
 
     # INFO - Local model update
+    client.epoch_counter = client.epoch_counter
+    client.step_counter = client.step_counter
     client.model = OrderedDict({k: v.clone().detach().cpu() for k, v in model.state_dict().items()})
     client.prev_model = deepcopy(model)
     return client
@@ -248,7 +276,8 @@ def run(client_setting: dict, training_setting: dict, b_save_model: bool = False
 
     # INFO - Client initialization
     client = Client
-    clients, aggregator = client_initialize(client, fed_dataset, test_loader, valid_loader,
+    aggregator = Aggregator
+    clients, aggregator = client_initialize(client,aggregator, fed_dataset, test_loader, valid_loader,
                                             client_setting, training_setting)
 
     start_runtime = time.time()
@@ -256,7 +285,7 @@ def run(client_setting: dict, training_setting: dict, b_save_model: bool = False
     try:
         stream_logger.info("[3] Global step starts...")
 
-        pbar = tqdm(range(training_setting['global_iter']), desc="Global steps #",
+        pbar = tqdm(range(training_setting['global_epochs']), desc="Global steps #",
                     postfix={'global_acc': aggregator.test_accuracy})
 
         for gr in pbar:
@@ -289,12 +318,18 @@ def run(client_setting: dict, training_setting: dict, b_save_model: bool = False
                                                                          end_time_global_iter - start_time_global_iter))
             summary_logger.info("Test Accuracy: {}".format(aggregator.test_accuracy))
 
-            if gr % 10 == 0:
-                F.mark_weight_distribution(trained_clients,aggregator.get_parameters(),aggregator.summary_writer,gr)
-            if gr == training_setting['global_iter']-1:
-                # global_info
+            if gr >= training_setting['global_epochs'] -3:
                 F.mark_hessian(aggregator.model, aggregator.test_loader, aggregator.summary_writer, gr)
-        F.mark_hessian(aggregator.model, aggregator.test_loader, aggregator.summary_writer, 0)
+            if gr == training_setting['global_epochs'] - 1:
+                F.compute_loss_slope(aggregator.model, aggregator.test_loader, aggregator.summary_writer, gr,
+                                   torch.nn.CrossEntropyLoss())
+
+            # if gr % 10 == 0:
+            #     F.mark_weight_distribution(trained_clients,aggregator.get_parameters(),aggregator.summary_writer,gr)
+            # if gr == training_setting['global_iter']-1:
+            #     # global_info
+            #     F.mark_hessian(aggregator.model, aggregator.test_loader, aggregator.summary_writer, gr)
+        #F.mark_hessian(aggregator.model, aggregator.test_loader, aggregator.summary_writer, 0)
         summary_logger.info("Global iteration finished successfully.")
     except Exception as e:
         system_logger, _ = get_logger(LOGGER_DICT['system'])

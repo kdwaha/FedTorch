@@ -388,6 +388,42 @@ def mark_norm_gap(model_l: Module, model_g: Module, dataloader: DataLoader,
 #
 #     summary_writer.add_scalar("max_hessian_eigen",max_eigval,epoch)
 #     summary_writer.add_scalar("hessian_trace",hessian_trace,epoch)
+
+def density_generate(eigenvalues,
+                     weights,
+                     num_bins=10000,
+                     sigma_squared=1e-5,
+                     overhead=0.01):
+
+    eigenvalues = np.array(eigenvalues)
+    weights = np.array(weights)
+
+    lambda_max = np.mean(np.max(eigenvalues, axis=1), axis=0) + overhead
+    lambda_min = np.mean(np.min(eigenvalues, axis=1), axis=0) - overhead
+
+    grids = np.linspace(lambda_min, lambda_max, num=num_bins)
+    sigma = sigma_squared * max(1, (lambda_max - lambda_min))
+
+    num_runs = eigenvalues.shape[0]
+    density_output = np.zeros((num_runs, num_bins))
+
+    for i in range(num_runs):
+        for j in range(num_bins):
+            x = grids[j]
+            tmp_result = gaussian(eigenvalues[i, :], x, sigma)
+            density_output[i, j] = np.sum(tmp_result * weights[i, :])
+    density = np.mean(density_output, axis=0)
+    normalization = np.sum(density) * (grids[1] - grids[0])
+    density = density / normalization
+    return density, grids
+
+def gaussian(x, x0, sigma_squared):
+    return np.exp(-(x0 - x)**2 /
+                  (2.0 * sigma_squared)) / np.sqrt(2 * np.pi * sigma_squared)
+
+
+
+
 def mark_hessian(model: Module, data_loader: DataLoader, summary_writer: SummaryWriter, epoch: int) -> None:
     """
     Compute the accuracy using its whole data.
@@ -413,7 +449,8 @@ def mark_hessian(model: Module, data_loader: DataLoader, summary_writer: Summary
     loss_fn = torch.nn.CrossEntropyLoss().to(device)
 
     hessian_comp = hessian(model, loss_fn, dataloader=data_loader, cuda=True) # use it for computing hessian
-    top_eigenvalues, _ = hessian_comp.eigenvalues()
+    top_eigenvalues, _ = hessian_comp.eigenvalues(top_n=5)
+
     trace = hessian_comp.trace()
     density_eigens, density_weights = hessian_comp.density()
 
@@ -434,7 +471,10 @@ def mark_hessian(model: Module, data_loader: DataLoader, summary_writer: Summary
 
     lambda_min = np.min(density_eigens)
     lambda_max = np.max(density_eigens)
-    lambda_ratio = lambda_max/lambda_min
+
+    lambda_maxratio = top_eigenvalues[0]/ top_eigenvalues[4]
+
+    lambda_ratio = lambda_max/lambda_min## higher, better
     if lambda_ratio < 0.0:
         lambda_ratio = 0.0-lambda_ratio
 
@@ -445,8 +485,10 @@ def mark_hessian(model: Module, data_loader: DataLoader, summary_writer: Summary
     summary_writer.add_scalar("min_hessian_eigen",lambda_min,epoch)
     summary_writer.add_scalar("min_max_eigen_ratio",lambda_ratio,epoch)
 
-    if epoch%100 == 0:
-        summary_writer.add_figure("Hessian_eigen_density/{}".format(epoch), fig)
+    summary_writer.add_scalar("max_eigen/top5_eigen", lambda_maxratio, epoch)
+
+    summary_writer.add_figure("Hessian_eigen_density/{}".format(epoch), fig)
+
 
 
 
@@ -463,7 +505,7 @@ def mark_cosine_similarity(current_state: OrderedDict, original_state: OrderedDi
     Returns: (None)
 
     """
-    #device = "cpu"
+    device = "cpu"
 
     original_params = []  ## flattened global_weight
     local_params = []     ## flattened client_weight
@@ -480,7 +522,7 @@ def mark_cosine_similarity(current_state: OrderedDict, original_state: OrderedDi
 
     # INFO: Calculate Total Weight Similarity on each client
     cos_sim = torch.nn.CosineSimilarity(dim=-1)
-    siml = cos_sim(local_params, original_params).item()
+    siml = cos_sim(local_params.to(device), original_params.to(device)).item()
 
     summary_writer.add_scalar("cosine_similarity", siml, epoch)
 
@@ -609,7 +651,12 @@ def Constrainting(original_state, current_state):
     grad_state = OrderedDict()
     new_state = OrderedDict()
 
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+
     for k in current_state.keys():
+        current_state[k]=current_state[k].to(device)#
+        original_state[k]=original_state[k].to(device)#
         original_params.append(torch.flatten(original_state[k].to(torch.float32)))
         local_params.append(torch.flatten(current_state[k].to(torch.float32)))
         grad_state[k] = current_state[k] - original_state[k]
@@ -625,7 +672,7 @@ def Constrainting(original_state, current_state):
 
     gmean_params = torch.full(local_params.shape, grad_mean)
 
-    grad_params -= gmean_params
+    grad_params -= gmean_params.to(device)
 
     GG = torch.dot(original_params, original_params)
     G = torch.sqrt(GG)
@@ -643,7 +690,7 @@ def Constrainting(original_state, current_state):
     ## INFO: Update the local model with centered & orthogonalized gradient
     for k in current_state.keys():
         gmean_tensor = torch.full(grad_state[k].shape, grad_mean)
-        new_state[k] = original_state[k] * (1 - parallel_scale) + grad_state[k] - gmean_tensor
+        new_state[k] = original_state[k] - original_state[k] * parallel_scale + grad_state[k] - gmean_tensor.to(device)
 
     return new_state
 
@@ -659,17 +706,21 @@ def Constrainting_layer_per_layer(original_state, current_state):
 
     Returns: new_state: (OrderedDict) Adjusted Model state
     """
+    device = "cuda" if torch.cuda.is_available() else "cpu"
 
     new_state = OrderedDict()
 
     for k in current_state.keys():
         # Normalize global parameters using L2 norm to satisfy w^2 = 2.0
-        ori_mean = torch.mean(original_state[k])
-        original_state[k] = original_state[k] - ori_mean
+        # ori_mean = torch.mean(original_state[k])
+        # original_state[k] = original_state[k] - ori_mean
 
-        l2_norm = torch.norm(original_state[k])
-        scaling_factor = torch.sqrt(torch.tensor(2.0)) / l2_norm
-        original_state[k] = original_state[k] * scaling_factor
+        #l2_norm = torch.norm(original_state[k])
+        #scaling_factor = torch.sqrt(torch.tensor(2.0)) / l2_norm
+        #original_state[k] = original_state[k] * scaling_factor
+
+        current_state[k]=current_state[k].to(device)
+        original_state[k]=original_state[k].to(device)
 
         grad = current_state[k] - original_state[k]
 
@@ -694,6 +745,241 @@ def Constrainting_layer_per_layer(original_state, current_state):
 
     return new_state
 
+## scale to proportional to weight on allocated perturbation
+## 0.01 ~ 0.20
+# loss_fn: Optional[Module] = None
+def compute_loss_along_random_direction(model, alpha, criterion, data_loader):
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    # 시드 설정
+    random.seed(42)
+    torch.manual_seed(42)
+    if device == "cuda":
+        torch.cuda.manual_seed_all(42)
+
+    # 무작위 방향 생성
+    direction = {name: torch.randn_like(param).to(device) for name, param in model.named_parameters()}
+    normalized_direction = {name: d / (d.norm() + 1e-5) for name, d in direction.items()}
+
+    original_state = {name: param.clone() for name, param in model.named_parameters()}
+
+    # perturb model
+    for name, param in model.named_parameters():
+        norm = param.data.norm()
+        param.data.add_(alpha * normalized_direction[name]*norm)
+
+    # loss 계산
+    total_loss = 0.0
+    for inputs, targets in data_loader:
+        inputs, targets = inputs.to(device), targets.to(device).to(torch.long)
+        outputs = model(inputs)
+        loss = criterion(outputs, targets)
+        total_loss += loss.item()
+
+    # 원래 모델 상태로 복원
+    model.load_state_dict(original_state)
+    return total_loss / len(data_loader)
+
+def compute_loss_slope(model: Module, data_loader: DataLoader,summary_writer: SummaryWriter, epoch: int,  loss_fn: Optional[Module] = None):
+    # loss 계산
+    alphas = np.linspace(-1, 1, 100)
+    losses = [compute_loss_along_random_direction(model, alpha, loss_fn, data_loader) for alpha in alphas]
+
+    # 계산된 loss를 시각화
+    fig = plt.figure()
+    plt.plot(alphas, losses)
+    plt.xlabel("Alpha")
+    plt.ylabel("Loss")
+    plt.title("Loss Landscape Along a Random Direction")
+    plt.show()
+    summary_writer.add_figure("Weight Density Plots/{}".format(epoch), fig)
+
+
+def compute_feature_weight_stat(model: Module,
+                                data_loader: DataLoader,
+                                seed: int = 42) -> Tuple[float, float, float, float]:
+    # 디바이스 설정
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    # 시드 설정
+    random.seed(seed)
+    torch.manual_seed(seed)
+    if device == "cuda":
+        torch.cuda.manual_seed_all(seed)
+
+    # 모델의 초기 상태 저장
+    original_state = {k: v.clone() for k, v in model.state_dict().items()}
+
+    # 무작위로 하나의 layer 선택
+    param_keys = list(model.state_dict().keys())
+    chosen_key = random.choice(param_keys)
+
+    # '.weight' 또는 '.bias'를 제거하여 layer_key를 얻습니다.
+    layer_key = chosen_key.rsplit('.', 1)[0]
+
+    # layer의 feature 차원 확인
+    if ".weight" in chosen_key or ".bias" in chosen_key:
+        feature_dim = model.state_dict()[chosen_key].shape[0]
+    else:
+        raise ValueError(f"Unsupported parameter key: {chosen_key}")
+
+    # 무작위로 하나의 feature 선택
+    feature_index = random.randint(0, feature_dim - 1)
+
+    model.to(device)
+    model.eval()
+
+    beta = 0.99  # Moving average factor
+    moving_avg_mean = None
+    moving_avg_var = None
+
+    def hook(module, input, output):
+        nonlocal moving_avg_mean, moving_avg_var
+
+        #feature_output = input[0][:, feature_index] ## use input value for bn layer
+        feature_output = output[:, feature_index] ## use output value
+
+        batch_mean = torch.mean(feature_output).detach()
+        batch_var = torch.var(feature_output).detach()
+
+        if moving_avg_mean is None:
+            moving_avg_mean = batch_mean
+            moving_avg_var = batch_var
+        else:
+            moving_avg_mean = beta * moving_avg_mean + (1 - beta) * batch_mean
+            moving_avg_var = beta * moving_avg_var + (1 - beta) * batch_var
+
+    # 특정 layer에 hook 추가
+    layer = dict(model.named_modules())[layer_key]
+    handle = layer.register_forward_hook(hook)
+
+    with torch.no_grad():
+        for x, _ in data_loader:
+            x = x.to(device)
+            outputs = model(x)
+
+    # Hook 제거
+    handle.remove()
+
+    # 해당 feature의 weight 값의 평균과 분산 계산
+    weight_values = model.state_dict()[chosen_key][feature_index]
+    weight_mean = torch.mean(weight_values).item()
+    weight_var = torch.var(weight_values).item()
+
+    # 모델의 상태를 원래대로 복구 # 필요한지??
+    model.load_state_dict(original_state)
+
+    return moving_avg_mean.item(), moving_avg_var.item(), weight_mean, weight_var
+
+
+def Normalize(original_state):
+    """
+    Adjust the gradient for each layer using centering and orthogonalization.
+    Args:
+        current_state: (OrderedDict) Local Model state
+        original_state: (OrderedDict) Global Model state
+
+    Returns: new_state: (OrderedDict) Adjusted Model state
+    """
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    for k in original_state.keys():
+        original_state[k] = original_state[k].to(device)
+        if original_state[k].dim() == 4:
+            # Normalize global parameters using L2 norm to satisfy w^2 = 2.0
+            # CNN 레이어에 대한 연산
+            ori_mean = original_state[k].mean(dim=1, keepdim=True).mean(dim=2, keepdim=True).mean(dim=3, keepdim=True)
+            original_state[k] = original_state[k] - ori_mean
+
+            l2_norm = original_state[k].norm(dim=1, keepdim=True).norm(dim=2, keepdim=True).norm(dim=3, keepdim=True)
+            scaling_factor = torch.sqrt(torch.tensor(2.0)) / l2_norm
+            original_state[k] = original_state[k]*scaling_factor
+
+        elif original_state[k].dim() == 2:
+            # Normalize global parameters using L2 norm to satisfy w^2 = 2.0
+            # Linear 레이어에 대한 연산
+            ori_mean = torch.mean(original_state[k], dim=1, keepdim=True)
+            original_state[k] = original_state[k] - ori_mean
+
+            l2_norm = torch.norm(original_state[k], dim=1, keepdim=True)
+            scaling_factor = torch.sqrt(torch.tensor(2.0)) / l2_norm
+            original_state[k] = original_state[k]*scaling_factor
+
+        else:
+            original_state[k] = original_state[k]
+
+    return original_state
+
+## INFO:
+## 1.Centering Gradient  2.Orthogonalize Gradient
+
+def Constrainting_strict(original_state, current_state):
+    """
+    Adjust the gradient for each layer using centering and orthogonalization.
+    Args:
+        current_state: (OrderedDict) Local Model state
+        original_state: (OrderedDict) Global Model state
+
+    Returns: new_state: (OrderedDict) Adjusted Model state
+    """
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    new_state = OrderedDict()
+    C = torch.nn.CosineSimilarity(dim=-1)
+
+    for k in current_state.keys():
+
+        current_state[k]=current_state[k].to(device)
+        original_state[k]=original_state[k].to(device)
+        grad = current_state[k] - original_state[k]
+
+        if grad.dim() == 4:  # CNN layer
+            # CNN 레이어에 대한 연산
+            G = original_state[k].norm(dim=1, keepdim=True).norm(dim=2, keepdim=True).norm(dim=3, keepdim=True)
+            dG = grad.norm(dim=1, keepdim=True).norm(dim=2, keepdim=True).norm(dim=3, keepdim=True)
+
+            gmean_tensor = grad.mean(dim=1, keepdim=True).mean(dim=2, keepdim=True).mean(dim=3, keepdim=True)
+            grad -= gmean_tensor
+
+            first, _, __, __ = original_state[k].size()
+            Gl = original_state[k].view(first, -1)
+            dGl = grad.view(first, -1)
+
+            cos_sim = C(Gl, dGl)
+
+            cos_sim = cos_sim[:, None, None, None]
+            parallel_scale = (cos_sim * dG) / G
+            new_state[k] = original_state[k] + grad - (parallel_scale * original_state[k])
+        elif grad.dim() == 2:  # Linear layer
+            # Linear 레이어에 대한 연산
+            G = torch.norm(original_state[k], dim=1, keepdim=True)
+            dG = torch.norm(grad, dim=1, keepdim=True)
+
+            gmean_tensor = torch.mean(grad, dim=1, keepdim=True)
+            grad -= gmean_tensor
+
+            cos_sim = C(grad, original_state[k])
+            cos_sim = cos_sim[:, None]
+            parallel_scale = (cos_sim * dG) / G
+            new_state[k] = original_state[k] + grad - (parallel_scale * original_state[k])
+        # elif grad.dim() == 2:  # Linear layer
+        #     # Linear 레이어에 대한 연산
+        #     G = torch.norm(original_state[k], dim=1, keepdim=True).norm(dim=2, keepdim=True)
+        #     dG = torch.norm(grad, dim=1, keepdim=True).norm(dim=2, keepdim=True)
+        #     gmean_tensor = torch.mean(grad, dim=1, keepdim=True).mean(dim=2, keepdim=True)
+        #     grad -= gmean_tensor
+        #
+        #     cos_sim = C(grad, original_state[k])
+        #     cos_sim = cos_sim[:, None]
+        #     parallel_scale = (cos_sim * dG) / G
+        #     new_state[k] = original_state[k] + grad - (parallel_scale * original_state[k])
+
+        else:
+            new_state[k] = current_state[k]
+            continue
+
+    return new_state
+
 
 ## INFO:
 ## extracting model state_dict(paramters)
@@ -703,3 +989,66 @@ def get_parameters(model, ordict: bool = True) -> Union[OrderedDict, Any]:
         return OrderedDict({k: v.clone().detach().cpu() for k, v in model.state_dict().items()})
     else:
         return [val.clone().detach().cpu() for _, val in model.state_dict().items()]
+
+
+## Sharpness Aware Minimization
+class SAM(torch.optim.Optimizer):
+    def __init__(self, params, base_optimizer, rho=1.0, adaptive = True, **kwargs): ## 0.5 // False
+        assert rho >= 0.0, f"Invalid rho, should be non-negative: {rho}"
+
+        defaults = dict(rho=rho, adaptive=adaptive, **kwargs)
+        super(SAM, self).__init__(params, defaults)
+
+        self.base_optimizer = base_optimizer(self.param_groups, **kwargs)
+        self.param_groups = self.base_optimizer.param_groups
+        self.defaults.update(self.base_optimizer.defaults)
+
+    @torch.no_grad()
+    def first_step(self, zero_grad=False):
+        grad_norm = self._grad_norm()
+        for group in self.param_groups:
+            scale = group["rho"] / (grad_norm + 1e-12)
+
+            for p in group["params"]:
+                if p.grad is None: continue
+                self.state[p]["old_p"] = p.data.clone()
+                e_w = (torch.pow(p, 2) if group["adaptive"] else 1.0) * p.grad * scale.to(p)
+                p.add_(e_w)  # climb to the local maximum "w + e(w)"
+
+        if zero_grad: self.zero_grad()
+
+    @torch.no_grad()
+    def second_step(self, zero_grad=False):
+        for group in self.param_groups:
+            for p in group["params"]:
+                if p.grad is None: continue
+                p.data = self.state[p]["old_p"]  # get back to "w" from "w + e(w)"
+
+        self.base_optimizer.step()  # do the actual "sharpness-aware" update
+
+        if zero_grad: self.zero_grad()
+
+    @torch.no_grad()
+    def step(self, closure=None):
+        assert closure is not None, "Sharpness Aware Minimization requires closure, but it was not provided"
+        closure = torch.enable_grad()(closure)  # the closure should do a full forward-backward pass
+
+        self.first_step(zero_grad=True)
+        closure()
+        self.second_step()
+
+    def _grad_norm(self):
+        shared_device = self.param_groups[0]["params"][0].device  # put everything on the same device, in case of model parallelism
+        norm = torch.norm(
+                    torch.stack([
+                        ((torch.abs(p) if group["adaptive"] else 1.0) * p.grad).norm(p=2).to(shared_device)
+                        for group in self.param_groups for p in group["params"]
+                        if p.grad is not None
+                    ]),
+                    p=2
+               )
+        return norm
+
+    def load_state_dict(self, state_dict):
+        super().load_state_dict(state_dict)
+        self.base_optimizer.param_groups = self.param_groups

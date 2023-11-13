@@ -13,7 +13,7 @@ def init_weights(layer):
 
 
 class CustomCNN(Module):
-    def __init__(self, num_classes: int = 10, b_global: bool = False, **kwargs):
+    def __init__(self, num_of_classes: int = 10, b_global: bool = False, **kwargs):
         super(CustomCNN, self).__init__()
         if b_global:
             self.features = Sequential(
@@ -25,27 +25,27 @@ class CustomCNN(Module):
                 MaxPool2d((2, 2))
             )
             self.fc = Sequential(
-                Linear(16 * kwargs['n_of_clients'] * 5 * 5, 120),
+                Linear(16 * kwargs['n_of_clients'] * 5 * 5, 120, bias=False),
                 ReLU(),
-                Linear(120, 84),
+                Linear(120, 84, bias=False),
                 ReLU(),
-                Linear(84, num_classes)
+                Linear(84, num_of_classes, bias=False)
             )
         else:
             self.features = Sequential(
-                Conv2d(3, 6, (5, 5)),
+                Conv2d(3, 6, (5, 5), bias=False),# bias true
                 ReLU(),
                 MaxPool2d((2, 2)),
-                Conv2d(6, 16, (5, 5)),
+                Conv2d(6, 16, (5, 5), bias=False), # bias true
                 ReLU(),
                 MaxPool2d((2, 2))
             )
             self.fc = Sequential(
-                Linear(16 * 5 * 5, 120),
+                Linear(16 * 5 * 5, 120, bias=False), # bias true
                 ReLU(),
-                Linear(120, 84),
+                Linear(120, 84, bias=False), # bias true
                 ReLU(),
-                Linear(84, num_classes)
+                Linear(84, num_of_classes, bias=False) # bias true
             )
 
     def forward(self, x):

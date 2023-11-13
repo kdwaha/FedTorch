@@ -17,7 +17,7 @@ def train(
     summary_writer = SummaryWriter(os.path.join(client.summary_path, "summaries"))
 
     # INFO - Call the model architecture and set parameters.
-    model = model_call(training_settings['model'], num_of_classes, features=False)
+    model = model_call(training_settings['model'], num_of_classes, features=False,bn=training_settings['bn'])
     model.load_state_dict(client.model)
     model = model.to(device)
 
@@ -30,7 +30,7 @@ def train(
     if training_settings['optim'].lower() == 'sgd':
         optim = optimizer(filter(lambda p: p.requires_grad, model.parameters()),
                           lr=training_settings['local_lr'],
-                          momentum=training_settings['momentum'])
+                          momentum=training_settings['momentum'], weight_decay=training_settings['weight_decay'])
     else:
         optim = optimizer(filter(lambda p: p.requires_grad, model.parameters()),
                           lr=training_settings['local_lr'])
@@ -60,6 +60,8 @@ def train(
             proximal_term = 0.0
 
             for k in current_state.keys():
+                current_state[k] =current_state[k].to(device)
+                original_state[k] = original_state[k].to(device)
                 proximal_term += (current_state[k] - original_state[k]).norm(2)
 
             loss = loss_fn(outputs, labels) + mu * proximal_term
@@ -70,9 +72,14 @@ def train(
             current_state = F.get_parameters(model)
 
             ############## for constraint  ############################
-            #new_state = F.Constrainting(original_state, current_state)
-            #
-            #model.load_state_dict(new_state, strict=True)
+            #current_state = F.Constrainting(original_state, current_state)
+            if training_settings['const']:
+                for k in current_state.keys():
+                    current_state[k] =current_state[k].to(device)
+                    original_state[k] = original_state[k].to(device)
+                #current_state = F.Constrainting_layer_per_layer(original_state, current_state)
+                current_state = F.Constrainting_strict(original_state, current_state)
+                model.load_state_dict(current_state, strict=True)
             ###########################################################
 
             # INFO - Step summary
@@ -92,6 +99,13 @@ def train(
         test_acc, test_loss = F.compute_accuracy(model, client.test_loader, loss_fn)
         train_acc, train_loss = F.compute_accuracy(model, client.train_loader, loss_fn)
 
+        fmean, fvar, wmean, wvar = F.compute_feature_weight_stat(model, client.test_loader)
+
+        summary_writer.add_scalar('epoch_fmean/test', fmean, client.epoch_counter)
+        summary_writer.add_scalar('epoch_fvar/test', fvar, client.epoch_counter)
+        summary_writer.add_scalar('epoch_wmean/test', wmean, client.epoch_counter)
+        summary_writer.add_scalar('epoch_wvar/test', wvar, client.epoch_counter)
+
         summary_writer.add_scalar('epoch_loss/train', train_loss, client.epoch_counter)
         summary_writer.add_scalar('epoch_loss/test', test_loss, client.epoch_counter)
 
@@ -99,7 +113,7 @@ def train(
         summary_writer.add_scalar('epoch_acc/local_test', test_acc, client.epoch_counter)
 
         ## Hessian info
-        F.mark_hessian(model, client.test_loader, summary_writer, client.epoch_counter)
+        # F.mark_hessian(model, client.test_loader, summary_writer, client.epoch_counter)
 
         # F.mark_accuracy(client, model, summary_writer)
         # F.mark_entropy(client, model, summary_writer)
@@ -108,7 +122,8 @@ def train(
         F.mark_norm_size(current_state, summary_writer, client.epoch_counter)
 
         client.epoch_counter += 1
-
+    client.epoch_counter = client.epoch_counter
+    client.step_counter = client.step_counter
     # INFO - Local model update
     client.model = OrderedDict({k: v.clone().detach().cpu() for k, v in model.state_dict().items()})
     return client
@@ -209,11 +224,11 @@ def run(client_setting: dict, training_setting: dict, b_save_model: bool = False
             sampled_clients = F.client_sampling(clients, sample_ratio=training_setting['sample_ratio'], global_round=gr)
 
             # INFO - COS decay
-            training_setting['local_lr'] = 1/2*initial_lr*(1+math.cos(aggregator.global_iter*math.pi/total_g_epochs))
-            stream_logger.debug("[*] Learning rate decay: {}".format(training_setting['local_lr']))
-            summary_logger.info("[{}/{}] Current local learning rate: {}".format(aggregator.global_iter,
-                                                                                 total_g_epochs,
-                                                                                 training_setting['local_lr']))
+            # training_setting['local_lr'] = 1/2*initial_lr*(1+math.cos(aggregator.global_iter*math.pi/total_g_epochs))
+            # stream_logger.debug("[*] Learning rate decay: {}".format(training_setting['local_lr']))
+            # summary_logger.info("[{}/{}] Current local learning rate: {}".format(aggregator.global_iter,
+            #                                                                      total_g_epochs,
+            #                                                                      training_setting['local_lr']))
 
             trained_clients = local_training(clients=sampled_clients,
                                              training_settings=training_setting,
@@ -232,10 +247,16 @@ def run(client_setting: dict, training_setting: dict, b_save_model: bool = False
                                                                          end_time_global_iter - start_time_global_iter))
             summary_logger.info("Test Accuracy: {}".format(aggregator.test_accuracy))
 
-            if gr % 10 == 0:
-                F.mark_weight_distribution(trained_clients,aggregator.get_parameters(),aggregator.summary_writer,gr)
+            if gr >= training_setting['global_epochs'] -3:
+                F.mark_hessian(aggregator.model, aggregator.test_loader, aggregator.summary_writer, gr)
+            if gr == training_setting['global_epochs'] - 1:
+                F.compute_loss_slope(aggregator.model, aggregator.test_loader, aggregator.summary_writer, gr,
+                                   torch.nn.CrossEntropyLoss())
 
-        F.mark_hessian(aggregator.model, aggregator.test_loader, aggregator.summary_writer, 0)
+            # if gr % 10 == 0:
+            #     F.mark_weight_distribution(trained_clients,aggregator.get_parameters(),aggregator.summary_writer,gr)
+
+        # F.mark_hessian(aggregator.model, aggregator.test_loader, aggregator.summary_writer, 0)
         summary_logger.info("Global iteration finished successfully.")
     except Exception as e:
         system_logger, _ = get_logger(LOGGER_DICT['system'])

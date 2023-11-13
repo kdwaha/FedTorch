@@ -250,7 +250,7 @@ class FedCifar(CustomDataLoader):
 
 
 class DatasetWrapper(Dataset):
-    def __init__(self, data, transform=None, number_of_categories=10):
+    def __init__(self, data, transform=None, number_of_categories=100):
         self.data_x = data['x']
         self.data_y = data['y']
         self.transform = transform
