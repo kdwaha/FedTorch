@@ -29,6 +29,8 @@ class Client:
         self.step_counter = 0
         self.epoch_counter = 0
 
+        self.scale = 1.0
+
         # Log path
         self.summary_path = os.path.join(log_path, "{}".format(client_name))
 

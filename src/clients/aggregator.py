@@ -18,7 +18,7 @@ class Aggregator:
 
         # Data setting
         self.test_loader: DataLoader = test_data
-        self.valid_loader: DataLoader = valid_data
+        self.valid_loader: DataLoader = valid_data ## use it for validation data
 
         # Training settings
         self.training_settings = train_settings
@@ -27,6 +27,7 @@ class Aggregator:
 
         # Model
         self.model: Module = model_call(train_settings['model'], NUMBER_OF_CLASSES[dataset_name], bn = train_settings['bn'])
+        self.scale = 1.0
 
         main_dir = Path(log_path).parent.absolute()
         root_dir = Path("./logs").absolute()

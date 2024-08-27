@@ -4,7 +4,7 @@ from conf.logger_config import STREAM_LOG_LEVEL, SUMMARY_LOG_LEVEL, SYSTEM_LOG_L
 from torch import cuda
 from distutils.util import strtobool
 from datetime import datetime
-from src.methods import FedAvg, FedKL, FedConst, Fedprox, Scaffold, MOON, FedSAM, FedDyn  # , FedBalancer # FedIndi,
+from src.methods import FedAvg, Fedprox, Scaffold, MOON, FedSAM, FedDyn, AdaBest, FedLAW, FedWon  # , FedBalancer # FedIndi,
 
 import argparse
 import os
@@ -31,12 +31,17 @@ if __name__ == '__main__':
     # Training settings
     parser.add_argument('--method', type=str, default='avg')
     parser.add_argument('--const', type=lambda x: bool(strtobool(x)), default=False)
+    parser.add_argument('--riemann', type=lambda x: bool(strtobool(x)), default=False)
+    parser.add_argument('--orth', type=lambda x: bool(strtobool(x)), default=True)  #
+    parser.add_argument('--cent', type=lambda x: bool(strtobool(x)), default=True)  #
+    parser.add_argument('--localrie', type=lambda x: bool(strtobool(x)), default=False)
     parser.add_argument('--bn', type=lambda x: bool(strtobool(x)), default=True)
     parser.add_argument('--opt', type=str, default='SGD')
     parser.add_argument('--batch', type=int, default=50)
     parser.add_argument('--local_iter', type=int, default=5)
     parser.add_argument('--global_iter', type=int, default=50)
     parser.add_argument('--local_lr', type=float, default=0.01)
+    parser.add_argument('--wd', type=float, default=1e-4)
     parser.add_argument('--global_lr', type=float, default=1.0)
     parser.add_argument('--momentum', type=float, default=0.9)
     parser.add_argument('--sample_ratio', type=float, default=1.0)
@@ -98,18 +103,22 @@ if __name__ == '__main__':
         'local_lr': args.local_lr,
         'momentum': args.momentum,
         'local_epochs': args.local_iter,
-        'global_epochs': args.global_iter,  ## 수정함
+        'global_epochs': args.global_iter,
         'batch_size': args.batch,
         'use_gpu': args.gpu,
         'gpu_frac': args.gpu_frac,
         'summary_count': args.summary_count,
         'sample_ratio': args.sample_ratio,
         'temperature': args.T,
-        'weight_decay': 0.0,#1e-5
+        'weight_decay': args.wd,#0.0 ,## 1e-4
         'kl_temp': 2,
         'indicator_temp': 1,
         'mu': args.mu,
         'const': args.const,
+        'orth': args.orth,
+        'cent': args.cent,
+        'riemann': args.riemann,
+        'localrie': args.localrie,
         'bn' : args.bn
     }
 
@@ -132,8 +141,6 @@ if __name__ == '__main__':
             FedAvg.run(client_settings, train_settings, b_save_model=args.save_model, b_save_data=args.save_data)
         elif method == 'prox' :
             Fedprox.run(client_settings, train_settings, b_save_model=args.save_model, b_save_data=args.save_data)
-        elif method == 'const' :
-            FedConst.run(client_settings, train_settings, b_save_model=args.save_model, b_save_data=args.save_data)
         elif method == 'sca' :
             Scaffold.run(client_settings, train_settings, b_save_model=args.save_model, b_save_data=args.save_data)
         elif method == 'sam' :
@@ -142,8 +149,15 @@ if __name__ == '__main__':
             FedDyn.run(client_settings, train_settings, b_save_model=args.save_model, b_save_data=args.save_data)
         elif method =='moon' :
             MOON.run(client_settings,train_settings, b_save_model=args.save_model, b_save_data= args.save_data)
+        elif method == 'ada' :
+            AdaBest.run(client_settings, train_settings, b_save_model=args.save_model, b_save_data=args.save_data)
+        elif method == 'law' :
+            FedLAW.run(client_settings, train_settings, b_save_model=args.save_model, b_save_data=args.save_data)
+        elif method == 'won' :
+            FedWon.run(client_settings, train_settings, b_save_model=args.save_model, b_save_data=args.save_data)
         else:
             print("no method found")
+
         # MOON.run(client_settings, train_settings, b_save_model=args.save_model, b_save_data=args.save_data)
         # FedSAM.run(client_settings, train_settings, b_save_model=args.save_model, b_save_data=args.save_data)
 

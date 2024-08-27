@@ -1,7 +1,8 @@
 from src import *
 from src.model import *
 from torch.nn import *
-
+import torch.nn as nn
+import math
 
 def init_weights(layer):
     if isinstance(layer, Conv2d):
@@ -10,8 +11,64 @@ def init_weights(layer):
     elif isinstance(layer, Linear):
         init.xavier_uniform(layer.weight)
         layer.bias.data.fill_(0.01)
+#
+# class Conv2d(torch.nn.Conv2d):
+#
+#     def __init__(self, in_channels, out_channels, kernel_size, stride=1,
+#                  padding=0, dilation=1, groups=1, bias=True):
+#         super(Conv2d, self).__init__(in_channels, out_channels, kernel_size, stride,
+#                  padding, dilation, groups, bias)
+#
+#     def forward(self, x):
+#         weight = self.weight
+#         weight_mean = weight.mean(dim=1, keepdim=True).mean(dim=2,
+#                                   keepdim=True).mean(dim=3, keepdim=True)
+#         weight = weight - weight_mean
+#         std = weight.view(weight.size(0), -1).std(dim=1).view(-1, 1, 1, 1) + 1e-5
+#         weight = weight / std.expand_as(weight)
+#         return F.conv2d(x, weight, self.bias, self.stride,
+#                         self.padding, self.dilation, self.groups)
+#
+#
+#
+#
+# class Linear(torch.nn.Module):
+#     def __init__(self, in_features, out_features, bias=True):
+#         super(Linear, self).__init__()
+#         # 입력 특성과 출력 특성의 수를 초기화합니다.
+#         self.in_features = in_features
+#         self.out_features = out_features
+#         # 가중치와 편향을 파라미터로 등록합니다.
+#         self.weight = nn.Parameter(torch.Tensor(out_features, in_features))
+#         if bias:
+#             self.bias = nn.Parameter(torch.Tensor(out_features))
+#         else:
+#             self.register_parameter('bias', None)  # 편향이 없는 경우입니다.
+#         self.reset_parameters()
+#
+#     def reset_parameters(self):
+#         # 가중치를 적절히 초기화합니다. 여기서는 He 초기화 방법을 사용합니다.
+#         nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
+#         if self.bias is not None:
+#             # 편향을 초기화합니다.
+#             fan_in, _ = nn.init._calculate_fan_in_and_fan_out(self.weight)
+#             bound = 1 / math.sqrt(fan_in)
+#             nn.init.uniform_(self.bias, -bound, bound)
+#
+#     def forward(self, x):
+#         # 가중치에서 입력 특성 차원에 대한 평균을 계산합니다.
+#         weight_mean = self.weight.mean(dim=1, keepdim=True)
+#         # 평균을 가중치에서 빼서 가중치의 평균을 0으로 만듭니다.
+#         weight = self.weight - weight_mean
+#         # 표준 편차를 계산하고 1e-5를 더해 0으로 나누는 것을 방지합니다.
+#         std = weight.view(self.out_features, -1).std(dim=1).view(-1, 1) + 1e-5
+#         # 가중치를 표준 편차로 나누어 표준화합니다.
+#         weight = weight / std.expand_as(weight)
+#         # 표준화된 가중치와 입력 x를 사용하여 선형 변환을 수행합니다.
+#         return F.linear(x, weight, self.bias)
+#
 
-
+## dyn 구현체로 확인해 볼 것//
 class CustomCNN(Module):
     def __init__(self, num_of_classes: int = 10, b_global: bool = False, **kwargs):
         super(CustomCNN, self).__init__()

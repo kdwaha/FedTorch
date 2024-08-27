@@ -25,6 +25,9 @@ def train(
     model = model.to(device)
 
     original_state = F.get_parameters(model)
+    if training_settings['localrie']:
+        original_state = F.Constrainting_sphere(original_state)
+        model.load_state_dict(original_state, strict=True)
 
 
     if not hasattr(client,'prev_model'):
@@ -56,6 +59,30 @@ def train(
     #     early_stop = None
 
     loss_fn = torch.nn.CrossEntropyLoss().to(device)
+
+    gmean = {}
+    gmean_prev = {}
+    gmeanrie = {}
+    gmean_prevrie = {}
+    gvar = 0
+    gnorm = 0
+    gvarrie = 0
+    gnormrie = 0
+
+    gvarv = {}
+    gvarriev = {}
+    gsq = {}
+    gsqrie = {}
+    for k, v in original_state.items():
+        gmean[k] = torch.zeros_like(v.data)
+        gmean_prev[k] = torch.zeros_like(v.data)
+        gmeanrie[k] = torch.zeros_like(v.data)
+        gmean_prevrie[k] = torch.zeros_like(v.data)
+
+        gsq[k] = torch.zeros_like(v.data)
+        gsqrie[k] = torch.zeros_like(v.data)
+        gvarv[k] = torch.zeros_like(v.data)
+        gvarriev[k] = torch.zeros_like(v.data)
 
     # INFO: Local training logic
     for _ in range(training_settings['local_epochs']):
@@ -134,7 +161,7 @@ def train(
 
 
             ############################################################
-
+            prev_state = F.get_parameters(model)
             loss.backward()
             optim.step()
 
@@ -159,13 +186,82 @@ def train(
                     current_state[k] =current_state[k].to(device)
                     original_state[k] = original_state[k].to(device)
             # current_state = F.Constrainting_layer_per_layer(original_state, current_state)
-                current_state = F.Constrainting_strict(original_state, current_state)
+                #current_state = F.Constrainting_strict(original_state, current_state)
+                current_state = F.Constrainting_sphere(current_state)
                 model.load_state_dict(current_state, strict=True)
+
+            # for k in current_state.keys():
+            #     current_state[k] = current_state[k].to(device)
+            #     prev_state[k] = prev_state[k].to(device)
+            #     gmean[k] =gmean[k].to(device)
+            #
+            #     gnorm += ((current_state[k] - prev_state[k]).norm(2)**2).detach()  # accumulating
+            #     gmean[k] += (current_state[k] - prev_state[k]).detach()  # accumulating mean , not for record
+            #     gvar += ((current_state[k] - prev_state[k] - gmean_prev[k].to(device)).norm(2)**2).detach()  ## this way
+
+            gvar = 0.0
+            gnorm = 0.0
+            for name, param in model.named_parameters():
+                if param.grad is not None:
+                    # Compute the correction term
+                    gmean[name] = 0.99 * gmean[name].to(device)
+                    gsq[name] = 0.99 * gsq[name].to(device)
+
+                    gmean[name] += 0.01 * param.grad.to(device)
+                    gsq[name] += 0.01 * (param.grad.to(device) * param.grad.to(device))
+
+                    gvarv[name] = (gsq[name] - gmean[name] * gmean[name])
+                    gvar = gvarv[name].norm(1).detach()
+                    gnorm += (param.grad.norm(2) ** 2).detach()  ##.to(param.grad.device)
+
+            if training_settings['localrie']:
+
+                current_state = F.Constrainting_strict(prev_state, current_state) # asserting only orthogonal part to be remained
+
+                gvarrie = 0.0
+                gnormrie = 0.0
+                for k in current_state.keys():
+                    current_state[k] =current_state[k].to(device)
+                    prev_state[k] = prev_state[k].to(device)
+                    gmeanrie[k] = gmeanrie[k].to(device)
+                    gsqrie[k] = gsqrie[k].to(device)
+
+                    gmeanrie[k] = 0.99 * gmeanrie[k].to(device)
+                    gsqrie[k] = 0.99 * gsqrie[k].to(device)
+
+                    gnormrie += ((current_state[k]-prev_state[k]).norm(2)**2).detach() #accumulating
+                    gmeanrie[k] += (current_state[k]-prev_state[k]).detach() #accumulating mean , not for record
+                    #gvarrie += ((current_state[k] - prev_state[k]-gmean_prevrie[k].to(device)).norm(2)**2).detach() ## this way
+                    gvarriev[k] = (gsqrie[k] - gmeanrie[k] * gmeanrie[k])
+                    gvarrie = gvarriev[k].norm(1).detach()
+
+                current_state = F.Exponential(prev_state,current_state)
+                model.load_state_dict(current_state, strict=True)
+
 
             if summary_counter % training_settings["summary_count"] == 0:
                 training_acc, _ = F.compute_accuracy(model, client.train_loader, loss_fn)
                 summary_writer.add_scalar('step_loss', training_loss / summary_counter, client.step_counter)
                 summary_writer.add_scalar('step_acc', training_acc, client.step_counter)
+                summary_writer.add_scalar('step_gnorm', gnorm , client.step_counter)
+                summary_writer.add_scalar('step_gvar', gvar , client.step_counter)
+
+                if training_settings['localrie']:
+                    summary_writer.add_scalar('step_gnormrie', gnormrie, client.step_counter)
+                    summary_writer.add_scalar('step_gvarrie', gvarrie , client.step_counter)
+
+                gvar = 0
+                gnorm = 0
+                gvarrie = 0
+                gnormrie = 0
+
+                for k, v in original_state.items():
+                    gmean_prev[k] = gmean[k] / summary_counter
+                    gmean_prevrie[k] = gmeanrie[k] / summary_counter
+                    gmean[k] = torch.zeros_like(v.data)
+                    gmeanrie[k] = torch.zeros_like(v.data)
+
+
                 summary_counter = 0
                 training_loss = 0
 
@@ -199,6 +295,9 @@ def train(
     # INFO - Local model update
     client.epoch_counter = client.epoch_counter
     client.step_counter = client.step_counter
+    #current_state = F.get_parameters(model)
+    #current_state = F.Logarithm(original_state, current_state)
+    #model.load_state_dict(current_state, strict=True)
     client.model = OrderedDict({k: v.clone().detach().cpu() for k, v in model.state_dict().items()})
     client.prev_model = deepcopy(model)
     return client
@@ -238,6 +337,8 @@ def fed_avg(clients: List[Client], aggregator: Aggregator, global_lr: float, mod
     total_len = 0
     empty_model = OrderedDict()
 
+    original_state = aggregator.get_parameters()
+
     for client in clients:
         total_len += client.data_len()
 
@@ -249,6 +350,15 @@ def fed_avg(clients: List[Client], aggregator: Aggregator, global_lr: float, mod
                 empty_model[k] += client.model[k] * (client.data_len() / total_len) * global_lr
 
     # Global model updates
+    # empty_model = F.Exponential(original_state, empty_model)
+    global_norm = 0
+    gnorm2 = 0
+    client_norm = 0
+    for k, v in aggregator.model.state_dict().items():
+        global_norm += ((empty_model[k] - original_state[k]).norm(2)) ** 2
+        gnorm2 += (empty_model[k].norm(2)) ** 2
+        for client in clients:
+            client_norm += (((client.model[k] - original_state[k]).norm(2)) ** 2) * (client.data_len() / total_len)
     aggregator.set_parameters(empty_model)
     aggregator.global_iter += 1
 
@@ -262,6 +372,10 @@ def fed_avg(clients: List[Client], aggregator: Aggregator, global_lr: float, mod
     # current_model = self.get_parameters()
     # self.calc_cos_similarity(original_model, current_model)
     aggregator.summary_writer.add_scalar('global_test_acc', aggregator.test_accuracy, aggregator.global_iter)
+    aggregator.summary_writer.add_scalar('drift_diversity', client_norm / global_norm, aggregator.global_iter)
+    aggregator.summary_writer.add_scalar('consistency', client_norm, aggregator.global_iter)
+    F.mark_norm_size(empty_model, aggregator.summary_writer, aggregator.global_iter)
+
 
     if model_save:
         aggregator.save_model()
@@ -279,6 +393,9 @@ def run(client_setting: dict, training_setting: dict, b_save_model: bool = False
     aggregator = Aggregator
     clients, aggregator = client_initialize(client,aggregator, fed_dataset, test_loader, valid_loader,
                                             client_setting, training_setting)
+    original_state = aggregator.get_parameters()
+    original_state = F.Constrainting_sphere(original_state)
+    aggregator.set_parameters(original_state)
 
     start_runtime = time.time()
     # INFO - Training Global Steps
@@ -318,7 +435,7 @@ def run(client_setting: dict, training_setting: dict, b_save_model: bool = False
                                                                          end_time_global_iter - start_time_global_iter))
             summary_logger.info("Test Accuracy: {}".format(aggregator.test_accuracy))
 
-            if gr >= training_setting['global_epochs'] -3:
+            if gr >= training_setting['global_epochs'] -1:
                 F.mark_hessian(aggregator.model, aggregator.test_loader, aggregator.summary_writer, gr)
             if gr == training_setting['global_epochs'] - 1:
                 F.compute_loss_slope(aggregator.model, aggregator.test_loader, aggregator.summary_writer, gr,

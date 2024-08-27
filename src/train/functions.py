@@ -1,5 +1,5 @@
 from src import *
-from src.clients import Aggregator
+from src.clients import Aggregator,Client
 from torch.nn import Module
 from torch.utils.tensorboard import SummaryWriter
 from src.train.train_utils import *
@@ -694,6 +694,107 @@ def Constrainting(original_state, current_state):
 
     return new_state
 
+# current_grad, original_grad
+def gsnr_scale(grad_state, pgrad_state):
+    """
+    Mark the cosine similarity between client and global
+    Args:
+        current_state: (OrderedDict) Local Model state
+        original_state: (OrderedDict) Global Model state
+
+    Returns: new_state: (OrderedDict) Adjusted Model state
+    """
+
+    grad_params = []  ## flattened glob_weight
+    pgrad_params = []  ## flattened updated_local_weight
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+
+    for k in grad_state.keys():
+        grad_state[k]=grad_state[k].to(device)#
+        pgrad_state[k]=pgrad_state[k].to(device)#
+
+        grad_params.append(torch.flatten(grad_state[k].to(torch.float32)))
+        pgrad_params.append(torch.flatten(pgrad_state[k].to(torch.float32)))
+
+
+    ## flatten parameters and change to vector
+    grad_params = torch.cat(grad_params)
+    pgrad_params = torch.cat(pgrad_params)
+
+    scale = my_cosine_similarity(grad_params,pgrad_params)
+
+    return scale
+
+
+def my_cosine_similarity(a,b):
+    if torch.norm(a) == 0 or torch.norm(b) == 0:
+        return 0.0
+    cos_sim = torch.nn.CosineSimilarity(dim=-1)
+    return cos_sim(a,b)
+
+
+## for projcetion on gsnr
+def gsnr_update(original_state, current_state, gsnr_state, q=0):
+    """
+    Mark the cosine similarity between client and global
+    Args:
+        current_state: (OrderedDict) Local Model state
+        original_state: (OrderedDict) Global Model state
+
+    Returns: new_state: (OrderedDict) Adjusted Model state
+    """
+
+    original_params = []  ## flattened glob_weight
+    local_params = []  ## flattened updated_local_weight
+    gsnr_params = []  ## flattened gsnr_param
+
+    grad_state = OrderedDict()
+    new_state = OrderedDict()
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+
+    for k in current_state.keys():
+        current_state[k]=current_state[k].to(device)#
+        original_state[k]=original_state[k].to(device)#
+        gsnr_state[k] = gsnr_state[k].to(device)
+        original_params.append(torch.flatten(original_state[k].to(torch.float32)))
+        local_params.append(torch.flatten(current_state[k].to(torch.float32)))
+        gsnr_params.append(torch.flatten(gsnr_state[k].to(torch.float32)))
+        grad_state[k] = current_state[k] - original_state[k]
+
+    ## flatten parameters and change to vector
+    original_params = torch.cat(original_params)
+    local_params = torch.cat(local_params)
+    gsnr_params = torch.cat(gsnr_params)
+    grad_params = local_params - original_params
+
+
+    #For centering & orthogonalizing gradient
+
+
+    alpha = torch.dot(gsnr_params,gsnr_params)
+    beta = torch.dot(gsnr_params,grad_params)
+
+    cos_sim = torch.nn.CosineSimilarity(dim=-1)
+
+    C = cos_sim(grad_params, gsnr_params)
+
+    theta =beta/alpha
+    if q == 0 :
+        theta /= C ## use scaling
+
+
+    ################################################################################
+
+    ## INFO: Update the local model with centered & orthogonalized gradient
+    for k in current_state.keys():
+        new_state[k] = original_state[k]+gsnr_state[k]*theta
+
+    return new_state
+
 ## INFO:
 ## 1.Centering Gradient  2.Orthogonalize Gradient
 
@@ -793,6 +894,10 @@ def compute_loss_slope(model: Module, data_loader: DataLoader,summary_writer: Su
     plt.title("Loss Landscape Along a Random Direction")
     plt.show()
     summary_writer.add_figure("Weight Density Plots/{}".format(epoch), fig)
+    #for alpha, loss in zip(alphas, losses):
+    #    summary_writer.add_scalar("Loss_Landscape/Epoch_{}".format(epoch), loss, alpha)
+    for index, (alpha, loss) in enumerate(zip(alphas, losses)):
+        summary_writer.add_scalar("Loss_Landscape/Epoch_{}".format(epoch), loss, index)
 
 
 def compute_feature_weight_stat(model: Module,
@@ -871,7 +976,7 @@ def compute_feature_weight_stat(model: Module,
 
     return moving_avg_mean.item(), moving_avg_var.item(), weight_mean, weight_var
 
-
+## sphere constraint that just scaling to hyper-sphere.
 def Normalize(original_state):
     """
     Adjust the gradient for each layer using centering and orthogonalization.
@@ -888,22 +993,14 @@ def Normalize(original_state):
         if original_state[k].dim() == 4:
             # Normalize global parameters using L2 norm to satisfy w^2 = 2.0
             # CNN 레이어에 대한 연산
-            ori_mean = original_state[k].mean(dim=1, keepdim=True).mean(dim=2, keepdim=True).mean(dim=3, keepdim=True)
-            original_state[k] = original_state[k] - ori_mean
-
             l2_norm = original_state[k].norm(dim=1, keepdim=True).norm(dim=2, keepdim=True).norm(dim=3, keepdim=True)
-            scaling_factor = torch.sqrt(torch.tensor(2.0)) / l2_norm
-            original_state[k] = original_state[k]*scaling_factor
+            original_state[k] = original_state[k]/l2_norm
 
         elif original_state[k].dim() == 2:
             # Normalize global parameters using L2 norm to satisfy w^2 = 2.0
             # Linear 레이어에 대한 연산
-            ori_mean = torch.mean(original_state[k], dim=1, keepdim=True)
-            original_state[k] = original_state[k] - ori_mean
-
             l2_norm = torch.norm(original_state[k], dim=1, keepdim=True)
-            scaling_factor = torch.sqrt(torch.tensor(2.0)) / l2_norm
-            original_state[k] = original_state[k]*scaling_factor
+            original_state[k] = original_state[k] /l2_norm
 
         else:
             original_state[k] = original_state[k]
@@ -911,9 +1008,155 @@ def Normalize(original_state):
     return original_state
 
 ## INFO:
+## For constrained optimization
 ## 1.Centering Gradient  2.Orthogonalize Gradient
+# cent = True, ortho = True
+# to make it work on server
+# client final process
 
-def Constrainting_strict(original_state, current_state):
+# Logarithmic mapping
+
+def Logarithm( original_state, current_state):
+    """
+    Adjust the gradient for each layer using centering and orthogonalization.
+    Args:
+        current_state: (OrderedDict) Local Model state
+        original_state: (OrderedDict) Global Model state
+
+    Returns: new_state: (OrderedDict) Adjusted Model state
+    """
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    new_state = OrderedDict()
+    C = torch.nn.CosineSimilarity(dim=-1)
+
+    for k in current_state.keys():
+        if "running_mean" in k or "running_var" in k or "num_batches_tracked" in k: ##pass batch statistic part
+            new_state[k] = current_state[k]
+            continue
+
+        current_state[k]=current_state[k].to(device)
+        original_state[k]=original_state[k].to(device)
+        grad = current_state[k] - original_state[k]
+        new_state[k] = original_state[k]
+        if grad.dim() == 4:  # CNN layer
+
+
+            G = original_state[k].norm(dim=1, keepdim=True).norm(dim=2, keepdim=True).norm(dim=3, keepdim=True)
+            dG = grad.norm(dim=1, keepdim=True).norm(dim=2, keepdim=True).norm(dim=3, keepdim=True)
+
+            first, _, __, __ = original_state[k].size()
+            Gl = original_state[k].view(first, -1)
+            Crl = current_state[k].view(first, -1)#
+
+            dGl = grad.view(first, -1)
+
+            cos_sim = C(Gl, dGl)
+            cos_sim2 = C(Gl,Crl)#
+
+            cos_sim = cos_sim[:, None, None, None]
+            cos_sim2 = cos_sim2[:, None, None, None]#
+            theta = torch.acos(cos_sim2) ## have to use different one
+
+            parallel_scale = (cos_sim * dG) / G
+
+            grad = grad - (parallel_scale * original_state[k])  ##orthogonalze
+
+            dG = grad.norm(dim=1, keepdim=True).norm(dim=2, keepdim=True).norm(dim=3, keepdim=True)
+            grad /= dG
+            grad *= theta
+            #grad *= torch.full_like(new_state[k], 2.0 ** (0.5))
+
+            new_state[k] = new_state[k] + grad
+        elif grad.dim() == 2:  # Linear layer
+
+
+            G = torch.norm(original_state[k], dim=1, keepdim=True)
+            dG = torch.norm(grad, dim=1, keepdim=True)
+            cos_sim = C(grad, original_state[k])
+            cos_sim2 = C(original_state[k],current_state[k])
+
+            cos_sim = cos_sim[:, None]
+            cos_sim2 = cos_sim2[:, None]
+
+            theta = torch.acos(cos_sim2)## have to use different one
+
+            parallel_scale = (cos_sim * dG) / G
+
+            grad = grad -(parallel_scale*original_state[k]) ## orthogonalize
+
+            dG = grad.norm(dim=1, keepdim=True)
+            grad /= dG
+            grad *= theta
+            #grad *= torch.full_like(new_state[k], 2.0 ** (0.5))
+
+
+            new_state[k] = new_state[k] + grad
+        else:
+            new_state[k] = current_state[k]
+            continue
+
+    return new_state
+
+
+## INFO:
+## For constrained optimization
+## 1.Centering Gradient  2.Projection on Sphere
+# cent = True, sphere = True
+
+def Constrainting_sphere(current_state, central  = True, sphere = True):
+    """
+    Adjust the gradient for each layer using centering and orthogonalization.
+    Args:
+        current_state: (OrderedDict) Local Model state
+        original_state: (OrderedDict) Global Model state
+
+    Returns: new_state: (OrderedDict) Adjusted Model state
+    """
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    new_state = OrderedDict()
+
+    for k in current_state.keys():
+
+        current_state[k]=current_state[k].to(device)
+
+        #new_state[k] = current_state[k]
+        if 'weight' in k:
+            if current_state[k].dim() == 4:  # CNN layer
+                if central:
+                    current_state[k] -= current_state[k].mean(dim=1, keepdim=True).mean(dim=2, keepdim=True).mean(dim=3, keepdim=True)
+                if sphere:
+                    l2_norm = current_state[k].norm(dim=1, keepdim=True).norm(dim=2, keepdim=True).norm(dim=3, keepdim=True)
+                    current_state[k] = current_state[k] / l2_norm
+                    current_state[k] = current_state[k]*torch.full_like(current_state[k], 2.0**(0.5))
+
+                new_state[k] = current_state[k]
+            elif current_state[k].dim() == 2:  # Linear layer
+                if central :
+                    current_state[k] -= torch.mean(current_state[k], dim=1, keepdim=True)
+                if sphere:
+                    l2_norm = torch.norm(current_state[k],dim=1,keepdim=True)
+                    current_state[k] = current_state[k] / l2_norm
+                    current_state[k] = current_state[k] *torch.full_like(current_state[k], 2.0**(0.5))
+                    # torch.full_like(new_state[k],2.0**(0.5))
+
+                new_state[k] = current_state[k]
+        else:
+            new_state[k] = current_state[k]
+            continue
+
+    return new_state
+
+
+## INFO:
+## For constrained optimization
+## 1.Centering Gradient  2.Orthogonalize Gradient
+# cent = True, ortho = True
+
+## 여기서 gradient 만 사용해야 된다
+
+def Constrainting_strict(original_state, current_state, central  = True, orthogonal = True):
     """
     Adjust the gradient for each layer using centering and orthogonalization.
     Args:
@@ -932,53 +1175,338 @@ def Constrainting_strict(original_state, current_state):
         current_state[k]=current_state[k].to(device)
         original_state[k]=original_state[k].to(device)
         grad = current_state[k] - original_state[k]
+        new_state[k] = original_state[k]
+        if 'weight' in k:
+            if grad.dim() == 4:  # CNN layer
+                if central:
+                    gmean_tensor = grad.mean(dim=1, keepdim=True).mean(dim=2, keepdim=True).mean(dim=3, keepdim=True)
+                    grad -= gmean_tensor
+                if orthogonal:
+                    G = original_state[k].norm(dim=1, keepdim=True).norm(dim=2, keepdim=True).norm(dim=3, keepdim=True)
+                    dG = grad.norm(dim=1, keepdim=True).norm(dim=2, keepdim=True).norm(dim=3, keepdim=True)
 
-        if grad.dim() == 4:  # CNN layer
-            # CNN 레이어에 대한 연산
-            G = original_state[k].norm(dim=1, keepdim=True).norm(dim=2, keepdim=True).norm(dim=3, keepdim=True)
-            dG = grad.norm(dim=1, keepdim=True).norm(dim=2, keepdim=True).norm(dim=3, keepdim=True)
+                    first, _, __, __ = original_state[k].size()
+                    Gl = original_state[k].view(first, -1)
+                    dGl = grad.view(first, -1)
 
-            gmean_tensor = grad.mean(dim=1, keepdim=True).mean(dim=2, keepdim=True).mean(dim=3, keepdim=True)
-            grad -= gmean_tensor
+                    cos_sim = C(Gl, dGl)
 
-            first, _, __, __ = original_state[k].size()
-            Gl = original_state[k].view(first, -1)
-            dGl = grad.view(first, -1)
+                    cos_sim = cos_sim[:, None, None, None]
+                    parallel_scale = (cos_sim * dG) / G
+                    new_state[k] = original_state[k] - (parallel_scale * original_state[k])
 
-            cos_sim = C(Gl, dGl)
+                new_state[k] = new_state[k] + grad
+            elif grad.dim() == 2:  # Linear layer
+                if central :
+                    gmean_tensor = torch.mean(grad, dim=1, keepdim=True)
+                    grad -= gmean_tensor
+                if orthogonal:
+                    G = torch.norm(original_state[k], dim=1, keepdim=True)
+                    dG = torch.norm(grad, dim=1, keepdim=True)
+                    cos_sim = C(grad, original_state[k])
+                    cos_sim = cos_sim[:, None]
+                    parallel_scale = (cos_sim * dG) / G
+                    new_state[k] = original_state[k] - (parallel_scale * original_state[k])
+                new_state[k] = new_state[k] + grad
+        else:
+            new_state[k] = current_state[k]
+            continue
 
-            cos_sim = cos_sim[:, None, None, None]
-            parallel_scale = (cos_sim * dG) / G
-            new_state[k] = original_state[k] + grad - (parallel_scale * original_state[k])
-        elif grad.dim() == 2:  # Linear layer
-            # Linear 레이어에 대한 연산
-            G = torch.norm(original_state[k], dim=1, keepdim=True)
-            dG = torch.norm(grad, dim=1, keepdim=True)
+    return new_state
 
-            gmean_tensor = torch.mean(grad, dim=1, keepdim=True)
-            grad -= gmean_tensor
+def Constrainting_grad(original_state, grad, central  = True, orthogonal = True):
+    """
+    Adjust the gradient for each layer using centering and orthogonalization.
+    Args:
+        current_state: (OrderedDict) Local Model state
+        original_state: (OrderedDict) Global Model state
 
-            cos_sim = C(grad, original_state[k])
-            cos_sim = cos_sim[:, None]
-            parallel_scale = (cos_sim * dG) / G
-            new_state[k] = original_state[k] + grad - (parallel_scale * original_state[k])
-        # elif grad.dim() == 2:  # Linear layer
-        #     # Linear 레이어에 대한 연산
-        #     G = torch.norm(original_state[k], dim=1, keepdim=True).norm(dim=2, keepdim=True)
-        #     dG = torch.norm(grad, dim=1, keepdim=True).norm(dim=2, keepdim=True)
-        #     gmean_tensor = torch.mean(grad, dim=1, keepdim=True).mean(dim=2, keepdim=True)
-        #     grad -= gmean_tensor
-        #
-        #     cos_sim = C(grad, original_state[k])
-        #     cos_sim = cos_sim[:, None]
-        #     parallel_scale = (cos_sim * dG) / G
-        #     new_state[k] = original_state[k] + grad - (parallel_scale * original_state[k])
+    Returns: new_state: (OrderedDict) Adjusted Model state
+    """
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    new_state = OrderedDict()
+    C = torch.nn.CosineSimilarity(dim=-1)
+
+    for k in original_state.keys():
+
+        original_state[k]=original_state[k].to(device)
+        grad[k] = grad[k].to(device)
+
+        new_state[k] = original_state[k]
+        if 'weight' in k:
+            if grad[k].dim() == 4:  # CNN layer
+                if central:
+                    gmean_tensor = grad[k].mean(dim=1, keepdim=True).mean(dim=2, keepdim=True).mean(dim=3, keepdim=True)
+                    grad[k] -= gmean_tensor
+                if orthogonal:
+                    G = original_state[k].norm(dim=1, keepdim=True).norm(dim=2, keepdim=True).norm(dim=3, keepdim=True)
+                    dG = grad[k].norm(dim=1, keepdim=True).norm(dim=2, keepdim=True).norm(dim=3, keepdim=True)
+
+                    first, _, __, __ = original_state[k].size()
+                    Gl = original_state[k].view(first, -1)
+                    dGl = grad[k].view(first, -1)
+
+                    cos_sim = C(Gl, dGl)
+
+                    cos_sim = cos_sim[:, None, None, None]
+                    parallel_scale = (cos_sim * dG) / G
+                    grad[k] = grad[k] - (parallel_scale * original_state[k])
+                new_state[k] = grad[k]
+            elif grad[k].dim() == 2:  # Linear layer
+                if central :
+                    gmean_tensor = torch.mean(grad[k], dim=1, keepdim=True)
+                    grad[k] -= gmean_tensor
+                if orthogonal:
+                    G = torch.norm(original_state[k], dim=1, keepdim=True)
+                    dG = torch.norm(grad[k], dim=1, keepdim=True)
+                    cos_sim = C(grad[k], original_state[k])
+                    cos_sim = cos_sim[:, None]
+                    parallel_scale = (cos_sim * dG) / G
+                    grad[k] = grad[k] - (parallel_scale * original_state[k])
+                new_state[k] = grad[k]
+        else:
+            new_state[k] = grad[k]
+            continue
+
+    return new_state
+
+
+## for strict server
+## exponential mapping
+## rename the function
+
+def Exponential(original_state, current_state, scale = 1.0):
+    """
+    Adjust the gradient for each layer using centering and orthogonalization.
+    Args:
+        current_state: (OrderedDict) Local Model state
+        original_state: (OrderedDict) Global Model state
+
+    Returns: new_state: (OrderedDict) Adjusted Model state
+    """
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    new_state = OrderedDict()
+
+    for k in current_state.keys():
+
+        current_state[k]=current_state[k].to(device)
+        original_state[k]=original_state[k].to(device)
+        grad = current_state[k] - original_state[k]
+        new_state[k] = original_state[k]
+        if 'weight' in k:
+            if grad.dim() == 4:  # CNN layer
+
+                dG = grad.norm(dim=1, keepdim=True).norm(dim=2, keepdim=True).norm(dim=3, keepdim=True)
+                first, _, __, __ = original_state[k].size()
+
+                dG *= scale
+
+                #dG = torch.where(dG < 1e-7, torch.tensor( 1e-7 ).to(device), dG)
+                import math
+                dG=torch.clamp(dG ,min= torch.tensor(1e-7).to(device),max=torch.tensor(math.pi/2-1e-7).to(device))
+                norm = dG
+
+                dGt = torch.tan(dG) # tangent scaling
+                #
+                #torch.cos(dG) scale to origin
+                #torch.sin(dG)
+                # c = torch.cos(dG) #
+                # s = torch.sin(dG) #
+                #
+                # new_state[k] = original_state[k]*c + torch.full_like(norm, 2.0 ** (0.5))*s*grad/(dG) #
+
+
+                desired_norm_squared = dGt * torch.full_like(norm, 2.0**(0.5)) ## tangent scale  ## dGt  ##torch.sqrt(torch.full_like(norm, 2))*
+                #scale = desired_norm_squared / norm
+                grad /= norm
+                grad *= desired_norm_squared
+                #grad *= 2.0
+
+                new_state[k] = original_state[k] + grad
+                new_state[k] /= new_state[k].norm(dim=1, keepdim=True).norm(dim=2, keepdim=True).norm(dim=3, keepdim=True)
+                new_state[k] *= torch.full_like(new_state[k],2.0**(0.5))
+
+
+            elif grad.dim() == 2:  # Linear layer
+
+                dG = torch.norm(grad, dim=1, keepdim=True)
+
+                dG *= scale
+
+                #dG = torch.where(dG < 1e-7, torch.tensor(1e-7).to(device), dG)
+                import math
+                dG=torch.clamp(dG, min=torch.tensor(1e-7).to(device), max=torch.tensor(math.pi / 2 - 1e-7).to(device))
+                norm = dG
+                dGt = torch.tan(dG)
+
+                # c = torch.cos(dG) #
+                # s = torch.sin(dG) #
+                #
+                # new_state[k] = original_state[k]*c + torch.full_like(norm, 2.0 ** (0.5))*s*grad/dG #
+
+                desired_norm_squared = dGt*torch.full_like(norm, 2.0**(0.5)) # torch.sqrt(torch.full_like(norm, 2))*
+                #scale = desired_norm_squared / norm
+                grad /=norm
+                grad *=desired_norm_squared
+                #grad *= 2.0
+
+                new_state[k] = original_state[k] + grad
+                new_state[k] /= torch.norm(new_state[k], dim=1, keepdim=True)
+                new_state[k] *= torch.full_like(new_state[k],2.0**(0.5))
+                #new_state[k] *= torch.sqrt(torch.full_like(new_state[k], 2))
 
         else:
             new_state[k] = current_state[k]
             continue
 
     return new_state
+
+
+#
+# For random constraint
+def Constrainting_random(seed ,original_state, current_state):
+    """
+    Adjust the gradient for each layer using centering and orthogonalization.
+    Args:
+        current_state: (OrderedDict) Local Model state
+        original_state: (OrderedDict) Global Model state
+
+    Returns: new_state: (OrderedDict) Adjusted Model state
+    """
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    new_state = OrderedDict()
+    C = torch.nn.CosineSimilarity(dim=-1)
+    random.seed(seed)
+    torch.manual_seed(seed)
+
+    random_state = OrderedDict()
+    for k in current_state.keys():
+        # Create a new random state for original_state with the same shape as current_state[k]
+        random_state[k] = torch.randn_like(current_state[k], device=device)
+
+    for k in current_state.keys():
+
+        current_state[k]=current_state[k].to(device)
+        original_state[k]=original_state[k].to(device)
+        grad = current_state[k] - original_state[k]
+
+        if grad.dim() == 4:  # CNN layer
+
+            G = random_state[k].norm(dim=1, keepdim=True).norm(dim=2, keepdim=True).norm(dim=3, keepdim=True)
+            dG = grad.norm(dim=1, keepdim=True).norm(dim=2, keepdim=True).norm(dim=3, keepdim=True)
+
+            #gmean_tensor = grad.mean(dim=1, keepdim=True).mean(dim=2, keepdim=True).mean(dim=3, keepdim=True)
+            #grad -= gmean_tensor
+
+            first, _, __, __ = original_state[k].size()
+            Gl = random_state[k].view(first, -1)
+            dGl = grad.view(first, -1)
+
+            cos_sim = C(Gl, dGl)
+
+            cos_sim = cos_sim[:, None, None, None]
+            parallel_scale = (cos_sim * dG) / G
+            new_state[k] = original_state[k] + grad - (parallel_scale * random_state[k])
+        elif grad.dim() == 2:  # Linear layer
+
+            G = torch.norm(random_state[k], dim=1, keepdim=True)
+            dG = torch.norm(grad, dim=1, keepdim=True)
+
+            #gmean_tensor = torch.mean(grad, dim=1, keepdim=True)
+            #grad -= gmean_tensor
+
+            cos_sim = C(grad, random_state[k])
+            cos_sim = cos_sim[:, None]
+            parallel_scale = (cos_sim * dG) / G
+            new_state[k] = original_state[k] + grad - (parallel_scale * random_state[k])
+
+
+        else:
+            new_state[k] = current_state[k]
+            continue
+
+    return new_state
+
+
+## Riemannian Aggregation
+## get initial state with clients
+## consistently renormalize global update
+def Riemannian_mean(clients: List[Client], original_state, updates: int): # global_round: int
+    total_len = 0
+
+
+    #original_state = Constrainting_sphere(original_state)
+    original_state1 = original_state
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    for client in clients:
+        total_len += client.data_len()
+
+    for _ in range(updates):
+        riemann_clients = []
+        empty_model = OrderedDict()
+        for i in range(len(clients)):
+            riemann_clients.append(Logarithm(original_state, clients[i].model))
+
+        for k, v in original_state.items():
+            for i in range(len(clients)):
+                if k not in empty_model.keys():
+                    empty_model[k] = riemann_clients[i][k] * (clients[i].data_len() / total_len)  # * global_lr
+                else:
+                    empty_model[k] += riemann_clients[i][k] * (clients[i].data_len() / total_len)  # * global_lr
+        ## original_state, empty_model..
+        original_state = Exponential(original_state, empty_model, 0.5)
+
+    # riemann_clients = []
+    #
+    # target_norm = OrderedDict()
+    #
+    #
+    # wow = Logarithm(original_state1,original_state)
+    # for i in range(len(clients)):
+    #     riemann_clients.append(Logarithm(original_state1, clients[i].model))
+    # for k, v in original_state.items():
+    #     for i in range(len(clients)):
+    #         if k not in target_norm.keys():
+    #             if original_state1[k].dim() == 4:
+    #                 target_norm[k] = (riemann_clients[i][k] - original_state1[k]) * (clients[i].data_len() / total_len)  # * global_lr
+    #                 target_norm[k] = target_norm[k].norm(dim=1, keepdim=True).norm(dim=2, keepdim=True).norm(dim=3, keepdim=True)
+    #             else:
+    #                 target_norm[k] = (riemann_clients[i][k] - original_state1[k]) * (clients[i].data_len() / total_len)
+    #                 target_norm[k] = torch.norm(target_norm[k], dim=1, keepdim=True)
+    #         else:
+    #             if original_state1[k].dim() == 4:
+    #                 A = (riemann_clients[i][k] - original_state1[k]) * (clients[i].data_len() / total_len)  # * global_lr
+    #                 target_norm[k] += A.norm(dim=1, keepdim=True).norm(dim=2, keepdim=True).norm(dim=3, keepdim=True)
+    #             else:
+    #                 A = (riemann_clients[i][k] - original_state1[k]) * (clients[i].data_len() / total_len)
+    #                 target_norm[k] += torch.norm(A, dim=1, keepdim=True)
+    #             #empty_model[k] += riemann_clients[i][k] * (clients[i].data_len() / total_len)  # * global_lr
+    #
+    # for k, v in original_state.items():
+    #     if original_state1[k].dim() == 4:
+    #         grad = wow[k] - original_state1[k]
+    #         #grad /= (grad.norm(dim=1, keepdim=True).norm(dim=2, keepdim=True).norm(dim=3, keepdim=True))
+    #         targ=target_norm[k]/(grad.norm(dim=1, keepdim=True).norm(dim=2, keepdim=True).norm(dim=3, keepdim=True)*2.0+1e-8)
+    #         targ = torch.where(targ>1, targ, torch.tensor(1.0).to(device))
+    #         targ = torch.where(torch.isnan(targ), torch.tensor(1.0).to(device), targ)
+    #         original_state[k] = original_state1[k] + grad*targ
+    #     else:
+    #         grad = wow[k] - original_state1[k]
+    #         targ = target_norm[k]/(torch.norm(grad,dim=1,keepdim=True)*2.0+1e-8)
+    #         targ = torch.where(targ > 1, targ, torch.tensor(1.0).to(device))
+    #         targ = torch.where(torch.isnan(targ), torch.tensor(1.0).to(device), targ)
+    #         original_state[k] = original_state1[k] + grad * targ
+    #
+    # original_state =Exponential(original_state1,original_state)
+
+
+    return original_state
+
+
 
 
 ## INFO:

@@ -3,11 +3,12 @@ import copy
 import torch.nn.functional as F
 
 from .custom_cnn import CustomCNN, ModelFedCon
-from .cnn import SimpleCNN
+from .cnn import SimpleCNN, SimpleWNCNN
 from .resnet import ResNet50_cifar10,ResNet18_cifar10
 from torchvision.models import *
 from torch.nn import Sequential, Linear, ReLU
 from .vgg11 import VGG
+from .wonresnet import nf_resnet18
 
 def model_call(model_name: str, num_of_classes: int,bn = True, **kwargs):
     if model_name.lower() == 'custom_cnn':
@@ -40,6 +41,10 @@ def model_call(model_name: str, num_of_classes: int,bn = True, **kwargs):
         return _model
     elif model_name.lower() == 'simple_cnn':
         return SimpleCNN(num_classes=num_of_classes, **kwargs)
+    elif model_name.lower() == 'ws_cnn':
+        return SimpleWNCNN(num_classes=num_of_classes, **kwargs)
+    elif model_name.lower() =='ws_resnet':
+        return nf_resnet18(num_classes=num_of_classes, **kwargs)
     else:
         raise NotImplementedError("Not implemented yet.")
 
