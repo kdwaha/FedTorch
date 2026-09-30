@@ -8,7 +8,13 @@ from .resnet import ResNet50_cifar10,ResNet18_cifar10
 from torchvision.models import *
 from torch.nn import Sequential, Linear, ReLU
 from .vgg11 import VGG
-from .wonresnet import nf_resnet18
+
+# ``wonresnet.py`` is not part of the public master branch.  Keep its optional
+# model entry point from preventing the CNN / ResNet-18 baselines from loading.
+try:
+    from .wonresnet import nf_resnet18
+except ImportError:
+    nf_resnet18 = None
 
 def model_call(model_name: str, num_of_classes: int,bn = True, **kwargs):
     if model_name.lower() == 'custom_cnn':
@@ -44,6 +50,8 @@ def model_call(model_name: str, num_of_classes: int,bn = True, **kwargs):
     elif model_name.lower() == 'ws_cnn':
         return SimpleWNCNN(num_classes=num_of_classes, **kwargs)
     elif model_name.lower() =='ws_resnet':
+        if nf_resnet18 is None:
+            raise NotImplementedError("ws_resnet requires src/model/wonresnet.py, which is not included in this branch.")
         return nf_resnet18(num_classes=num_of_classes, **kwargs)
     else:
         raise NotImplementedError("Not implemented yet.")

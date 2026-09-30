@@ -1,6 +1,8 @@
 from . import *
 from src.model import NUMBER_OF_CLASSES
 from .utils import *
+import random
+import numpy as np
 
 
 @ray.remote(max_calls=1)
@@ -10,7 +12,15 @@ def train(
         num_of_classes: int,
         early_stopping: bool = False):
     # TODO: Need to check is_available() is allowed.
-    device = "cuda" if torch.cuda.is_available() is True else "cpu"
+    device = "cuda" if training_settings['use_gpu'] else "cpu"
+    if training_settings.get('seed') is not None:
+        round_id = client.global_iter[-1] if client.global_iter else 0
+        worker_seed = int(training_settings['seed']) + 10000 * round_id + int(client.name)
+        random.seed(worker_seed)
+        np.random.seed(worker_seed)
+        torch.manual_seed(worker_seed)
+        if device == "cuda":
+            torch.cuda.manual_seed_all(worker_seed)
 
     # INFO: Unblock the code if you use M1 GPU
     # device = torch.device('mps:0' if torch.backends.mps.is_available() else 'cpu')
@@ -27,7 +37,7 @@ def train(
     #model.load_state_dict(original_state, strict=True)
     #if training_settings['const']:
     if training_settings['localrie']:
-       original_state = F.Constrainting_sphere(original_state)
+       original_state = F.Constrainting_sphere(original_state, device=device)
        model.load_state_dict(original_state, strict=True)
 
     # INFO - Optimizer
@@ -107,7 +117,7 @@ def train(
             #current_state = F.Constrainting(original_state,current_state)
             if training_settings['const']:
                 #current_state = F.Constrainting_layer_per_layer(original_state, current_state)
-                current_state = F.Constrainting_strict(original_state, current_state)
+                current_state = F.Constrainting_strict(original_state, current_state, device=device)
                 model.load_state_dict(current_state, strict=True)
             ##############################################################
 
@@ -124,7 +134,7 @@ def train(
                 for k in current_state.keys():
                     current_state[k] =current_state[k].to(device)
                     prev_state[k] = prev_state[k].to(device)
-                current_state = F.Constrainting_sphere(current_state, central=training_settings['cent'],sphere=training_settings['orth'])
+                current_state = F.Constrainting_sphere(current_state, central=training_settings['cent'], sphere=training_settings['orth'], device=device)
                 model.load_state_dict(current_state, strict=True)
 
             ## for printing metric
@@ -148,7 +158,7 @@ def train(
 
             if training_settings['localrie']:
 
-                current_state = F.Constrainting_strict(prev_state, current_state,central=training_settings['cent'],orthogonal=training_settings['orth']) # asserting only orthogonal part to be remaineㅇ
+                current_state = F.Constrainting_strict(prev_state, current_state, central=training_settings['cent'], orthogonal=training_settings['orth'], device=device) # asserting only orthogonal part to be remaineㅇ
 
 
 
@@ -184,7 +194,7 @@ def train(
 
             if summary_counter % training_settings["summary_count"] == 0:
 
-                training_acc, _ = F.compute_accuracy(model, client.train_loader, loss_fn)
+                training_acc, _ = F.compute_accuracy(model, client.train_loader, loss_fn, device=device)
                 summary_writer.add_scalar('step_loss', training_loss / summary_counter, client.step_counter)
                 summary_writer.add_scalar('step_acc', training_acc, client.step_counter)
 
@@ -214,8 +224,8 @@ def train(
 
 
         # INFO - Epoch summary
-        test_acc, test_loss = F.compute_accuracy(model, client.test_loader, loss_fn)
-        train_acc, train_loss = F.compute_accuracy(model, client.train_loader, loss_fn)
+        test_acc, test_loss = F.compute_accuracy(model, client.test_loader, loss_fn, device=device)
+        train_acc, train_loss = F.compute_accuracy(model, client.train_loader, loss_fn, device=device)
         #
         # fmean, fvar, wmean, wvar = F.compute_feature_weight_stat(model, client.test_loader)
         # summary_writer.add_scalar('epoch_fmean/test', fmean, client.epoch_counter)
@@ -362,10 +372,11 @@ def run(client_setting: dict, training_setting: dict, b_save_model: bool = False
     # INFO - Client initialization
     client = Client
     aggregator: type(Aggregator) = Aggregator
-    clients, aggregator = client_initialize(client, aggregator, fed_dataset, test_loader, valid_loader,
+    clients, aggregator = client_initialize(client, aggregator, fed_dataset, valid_loader, test_loader,
                                             client_setting, training_setting)
     original_state = aggregator.get_parameters()
-    original_state = F.Constrainting_sphere(original_state)
+    initial_device = "cuda" if training_setting['use_gpu'] else "cpu"
+    original_state = F.Constrainting_sphere(original_state, device=initial_device)
     aggregator.set_parameters(original_state)
 
     start_runtime = time.time()
@@ -379,8 +390,9 @@ def run(client_setting: dict, training_setting: dict, b_save_model: bool = False
         for gr in pbar:
             start_time_global_iter = time.time()
 
-            # INFO - Save the global model
-            aggregator.save_model()
+            # INFO - Save model snapshots only when explicitly requested.
+            if b_save_model:
+                aggregator.save_model()
 
             # INFO - Download the model from aggregator
             stream_logger.debug("[*] Client downloads the model from aggregator...")
@@ -405,10 +417,10 @@ def run(client_setting: dict, training_setting: dict, b_save_model: bool = False
             summary_logger.info("Global Running time: {}::{:.2f}".format(gr,
                                                                          end_time_global_iter - start_time_global_iter))
             summary_logger.info("Test Accuracy: {}".format(aggregator.test_accuracy))
-            if gr == training_setting['global_epochs'] - 1:
+            if training_setting.get('diagnostics', False) and gr == training_setting['global_epochs'] - 1:
                 F.compute_loss_slope(aggregator.model, aggregator.test_loader, aggregator.summary_writer, gr,
                                    torch.nn.CrossEntropyLoss())
-            if gr >= training_setting['global_epochs'] -1:
+            if training_setting.get('diagnostics', False) and gr >= training_setting['global_epochs'] -1:
                 F.mark_hessian(aggregator.model, aggregator.test_loader, aggregator.summary_writer, gr)
            # if gr % 10 == 0:
            #     F.mark_weight_distribution(trained_clients,aggregator.get_parameters(),aggregator.summary_writer,gr)

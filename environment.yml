@@ -1,0 +1,22 @@
+name: fedtorch
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pytorch=2.1.*
+  - torchvision=0.16.*
+  - pytorch-cuda=12.1
+  - numpy=1.26.*
+  - pandas
+  - matplotlib
+  - seaborn
+  - pillow
+  - pyyaml
+  - tqdm
+  - pip
+  - pip:
+      - coloredlogs==15.0.1
+      - "ray[default]==2.9.3"
+      - tensorboard==2.15.2

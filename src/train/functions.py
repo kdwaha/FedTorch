@@ -3,7 +3,6 @@ from src.clients import Aggregator,Client
 from torch.nn import Module
 from torch.utils.tensorboard import SummaryWriter
 from src.train.train_utils import *
-from src.utils.hessian import hessian
 
 import random
 import ray
@@ -63,7 +62,7 @@ def compute_accuracy(model: Module,
     Returns: ((float) accuracy, (float) loss)
 
     """
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = kwargs.get("device", "cuda" if torch.cuda.is_available() else "cpu")
 
     model.to(device)
     model.eval()
@@ -448,7 +447,8 @@ def mark_hessian(model: Module, data_loader: DataLoader, summary_writer: Summary
 
     loss_fn = torch.nn.CrossEntropyLoss().to(device)
 
-    hessian_comp = hessian(model, loss_fn, dataloader=data_loader, cuda=True) # use it for computing hessian
+    from src.utils.hessian import hessian
+    hessian_comp = hessian(model, loss_fn, dataloader=data_loader, cuda=torch.cuda.is_available())
     top_eigenvalues, _ = hessian_comp.eigenvalues(top_n=5)
 
     trace = hessian_comp.trace()
@@ -1104,7 +1104,7 @@ def Logarithm( original_state, current_state):
 ## 1.Centering Gradient  2.Projection on Sphere
 # cent = True, sphere = True
 
-def Constrainting_sphere(current_state, central  = True, sphere = True):
+def Constrainting_sphere(current_state, central=True, sphere=True, device=None):
     """
     Adjust the gradient for each layer using centering and orthogonalization.
     Args:
@@ -1113,7 +1113,8 @@ def Constrainting_sphere(current_state, central  = True, sphere = True):
 
     Returns: new_state: (OrderedDict) Adjusted Model state
     """
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    if device is None:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
 
     new_state = OrderedDict()
 
@@ -1142,6 +1143,8 @@ def Constrainting_sphere(current_state, central  = True, sphere = True):
                     # torch.full_like(new_state[k],2.0**(0.5))
 
                 new_state[k] = current_state[k]
+            else:
+                new_state[k] = current_state[k]
         else:
             new_state[k] = current_state[k]
             continue
@@ -1156,7 +1159,7 @@ def Constrainting_sphere(current_state, central  = True, sphere = True):
 
 ## 여기서 gradient 만 사용해야 된다
 
-def Constrainting_strict(original_state, current_state, central  = True, orthogonal = True):
+def Constrainting_strict(original_state, current_state, central=True, orthogonal=True, device=None):
     """
     Adjust the gradient for each layer using centering and orthogonalization.
     Args:
@@ -1165,7 +1168,8 @@ def Constrainting_strict(original_state, current_state, central  = True, orthogo
 
     Returns: new_state: (OrderedDict) Adjusted Model state
     """
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    if device is None:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
 
     new_state = OrderedDict()
     C = torch.nn.CosineSimilarity(dim=-1)

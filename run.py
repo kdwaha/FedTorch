@@ -4,11 +4,28 @@ from conf.logger_config import STREAM_LOG_LEVEL, SUMMARY_LOG_LEVEL, SYSTEM_LOG_L
 from torch import cuda
 from distutils.util import strtobool
 from datetime import datetime
-from src.methods import FedAvg, Fedprox, Scaffold, MOON, FedSAM, FedDyn, AdaBest, FedLAW, FedWon  # , FedBalancer # FedIndi,
+from src.methods import FedAvg, Fedprox, Scaffold, MOON, FedSAM, FedDyn, AdaBest
 
 import argparse
+import random
 import os
 import traceback
+
+import numpy as np
+import ray
+import torch
+
+
+def set_seed(seed: int) -> None:
+    """Seed every RNG used before Ray workers are created."""
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
 
 if __name__ == '__main__':
     # Argument Parser
@@ -22,6 +39,7 @@ if __name__ == '__main__':
     parser.add_argument('--n_clients', type=int, required=True)
     parser.add_argument('--dirichlet_alpha', type=float, default=0.5)
     parser.add_argument('--dataset', type=str, default='Cifar-10')
+    parser.add_argument('--seed', type=int, default=2023)
     parser.add_argument('--save_data', type=lambda x: bool(strtobool(x)), default=False)
 
     # Model settings
@@ -52,11 +70,29 @@ if __name__ == '__main__':
     # Logs settings
     parser.add_argument('--exp_name', type=str, required=True)
     parser.add_argument('--summary_count', type=int, default=50)
+    parser.add_argument('--diagnostics', type=lambda x: bool(strtobool(x)), default=False,
+                        help='Run expensive loss-landscape/Hessian diagnostics after the final round.')
 
     # System settings
     parser.add_argument('--ray_core', type=int, default=1)
 
     args = parser.parse_args()
+
+    if args.n_clients <= 0:
+        parser.error('--n_clients must be positive.')
+    if args.ray_core <= 0:
+        parser.error('--ray_core must be positive.')
+
+    # The latest upstream master folds FedConst into FedAvg's constrained path.
+    # Keep a literal alias so experiment names and commands stay unambiguous.
+    method = args.method.lower()
+    if method in {'fedavg'}:
+        method = 'avg'
+    elif method in {'const', 'fedconst'}:
+        method = 'avg'
+        args.const = True
+
+    set_seed(args.seed)
 
     # INFO: Log settings
     experiment_name = args.exp_name
@@ -92,7 +128,7 @@ if __name__ == '__main__':
     client_settings = {
         'num_of_clients': args.n_clients,
         'dirichlet_alpha': args.dirichlet_alpha,
-        'dataset': args.dataset
+        'dataset': args.dataset,
     }
 
     # INFO: Training settings
@@ -119,7 +155,9 @@ if __name__ == '__main__':
         'cent': args.cent,
         'riemann': args.riemann,
         'localrie': args.localrie,
-        'bn' : args.bn
+        'bn': args.bn,
+        'seed': args.seed,
+        'diagnostics': args.diagnostics,
     }
 
     write_experiment_summary("Client Setting", client_settings)
@@ -128,8 +166,11 @@ if __name__ == '__main__':
                                                  'GPU Fraction': args.gpu_frac})
 
     # INFO: Main starts
-    method = args.method
     try:
+        ray.init(num_cpus=args.ray_core,
+                 include_dashboard=False,
+                 ignore_reinit_error=True,
+                 log_to_driver=False)
         # INFO: Run Function
         # TODO: Make additional Federated method
         # FedKL.run(client_settings, train_settings, b_save_model=args.save_model, b_save_data=args.save_data)
@@ -151,12 +192,8 @@ if __name__ == '__main__':
             MOON.run(client_settings,train_settings, b_save_model=args.save_model, b_save_data= args.save_data)
         elif method == 'ada' :
             AdaBest.run(client_settings, train_settings, b_save_model=args.save_model, b_save_data=args.save_data)
-        elif method == 'law' :
-            FedLAW.run(client_settings, train_settings, b_save_model=args.save_model, b_save_data=args.save_data)
-        elif method == 'won' :
-            FedWon.run(client_settings, train_settings, b_save_model=args.save_model, b_save_data=args.save_data)
         else:
-            print("no method found")
+            raise ValueError("Unknown method '{}'.".format(args.method))
 
         # MOON.run(client_settings, train_settings, b_save_model=args.save_model, b_save_data=args.save_data)
         # FedSAM.run(client_settings, train_settings, b_save_model=args.save_model, b_save_data=args.save_data)
@@ -164,4 +201,5 @@ if __name__ == '__main__':
     except Exception as e:
         system_logger.error(traceback.format_exc())
         raise Exception(traceback.format_exc())
-
+    finally:
+        ray.shutdown()
